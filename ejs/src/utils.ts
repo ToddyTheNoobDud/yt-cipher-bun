@@ -1,4 +1,4 @@
-import { type ESTree } from "npm:meriyah";
+import { type ESTree } from "meriyah";
 import { type DeepPartial } from "./types.ts";
 
 export function matchesStructure<T extends ESTree.Node>(
