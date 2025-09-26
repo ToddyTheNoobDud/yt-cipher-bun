@@ -1,4 +1,4 @@
-import { parse } from "npm:meriyah";
+import { parse } from "meriyah";
 
 export const setupNodes = parse(`
 globalThis.XMLHttpRequest = { prototype: {} };
