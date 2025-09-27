@@ -172,13 +172,19 @@ export class ProcessedCache {
         if (!this.options.persistenceFile) return;
 
         try {
+            const fs = await import('fs/promises');
+            const path = await import('path');
+
+            // Ensure directory exists
+            const dir = path.dirname(this.options.persistenceFile!);
+            await fs.mkdir(dir, { recursive: true });
+
             const dataToSave = {
                 options: this.options,
                 cache: Array.from(this.cache.entries()),
                 timestamp: Date.now(),
             };
 
-            const fs = await import('fs/promises');
             await fs.writeFile(
                 this.options.persistenceFile!,
                 JSON.stringify(dataToSave, null, 2),
