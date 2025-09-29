@@ -1,24 +1,21 @@
-const ALLOWED_HOSTNAMES = ["youtube.com", "www.youtube.com", "m.youtube.com"];
+const ALLOWED_HOSTNAMES = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
+const PLAYER_PATH_PREFIX = '/s/player/';
 
-export function validateAndNormalizePlayerUrl(playerUrl: string): string {
-    // Handle relative paths
-    if (playerUrl.startsWith('/')) {
-        if (playerUrl.startsWith('/s/player/')) {
-             return `https://www.youtube.com${playerUrl}`;
-        }
-        throw new Error(`Invalid player path: ${playerUrl}`);
+export const validateAndNormalizePlayerUrl = (playerUrl: string): string => {
+  if (playerUrl.startsWith('/')) {
+    if (!playerUrl.startsWith(PLAYER_PATH_PREFIX)) {
+      throw new Error(`Invalid player path: ${playerUrl}`);
     }
+    return `https://www.youtube.com${playerUrl}`;
+  }
 
-    // Handle absolute URLs
-    try {
-        const url = new URL(playerUrl);
-        if (ALLOWED_HOSTNAMES.includes(url.hostname)) {
-            return playerUrl;
-        } else {
-            throw new Error(`Player URL from invalid host: ${url.hostname}`);
-        }
-    } catch (e) {
-        // Not a valid URL, and not a valid path.
-        throw new Error(`Invalid player URL: ${playerUrl}`);
+  try {
+    const url = new URL(playerUrl);
+    if (!ALLOWED_HOSTNAMES.has(url.hostname)) {
+      throw new Error(`Player URL from invalid host: ${url.hostname}`);
     }
-}
+    return playerUrl;
+  } catch {
+    throw new Error(`Invalid player URL: ${playerUrl}`);
+  }
+};

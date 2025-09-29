@@ -1,63 +1,102 @@
-import type { Input as MainInput } from "../../ejs/src/main.ts";
-import { execInPool } from "../workerPool.ts";
-import { getPlayerFilePath } from "../playerCache.ts";
-import { preprocessedCache } from "../preprocessedCache.ts";
-import type { SignatureRequest, SignatureResponse } from "../types.ts";
+import type { Input as MainInput } from '../../ejs/src/main.ts';
+import { execInPool } from '../workerPool.ts';
+import { getPlayerFilePath } from '../playerCache.ts';
+import { preprocessedCache } from '../processedCache.ts';
+import type { SignatureRequest, SignatureResponse } from '../types.ts';
+import fs from 'fs/promises';
 
-export async function handleDecryptSignature(req: Request): Promise<Response> {
-    const { encrypted_signature, n_param, player_url }: SignatureRequest = await req.json();
+const _createErrorResponse = (message: string, status: number): Response =>
+  new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' }
+  });
 
-    const playerCacheKey = await getPlayerFilePath(player_url);
-    const cachedPreprocessedPlayer = preprocessedCache.get(playerCacheKey);
+export const handleDecryptSignature = async (req: Request): Promise<Response> => {
+  let body: any;
+  try {
+    const text = await req.text();
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    return _createErrorResponse('Invalid JSON body', 400);
+  }
 
-    const mainInput: MainInput = cachedPreprocessedPlayer
-        ? {
-            type: "preprocessed",
-            preprocessed_player: cachedPreprocessedPlayer,
-            requests: [
-                { type: "sig", challenges: encrypted_signature ? [encrypted_signature] : [] },
-                { type: "n", challenges: n_param ? [n_param] : [] },
-            ],
-        }
-        : {
-            type: "player",
-            player: await Deno.readTextFile(playerCacheKey),
-            output_preprocessed: true,
-            requests: [
-                { type: "sig", challenges: encrypted_signature ? [encrypted_signature] : [] },
-                { type: "n", challenges: n_param ? [n_param] : [] },
-            ],
-        };
+  const { encrypted_signature, n_param, player_url } = body as SignatureRequest;
 
-    const output = await execInPool(mainInput);
+  if (!player_url) {
+    return _createErrorResponse('player_url is required', 400);
+  }
 
-    if (output.type === 'error') {
-        throw new Error(output.error);
-    }
+  let playerFilePath: string;
+  try {
+    playerFilePath = await getPlayerFilePath(player_url);
+  } catch (err) {
+    return _createErrorResponse(
+      err instanceof Error ? err.message : 'Failed to resolve player file path',
+      500
+    );
+  }
 
-    if (output.preprocessed_player) {
-        preprocessedCache.set(playerCacheKey, output.preprocessed_player);
-        console.log(`Cached preprocessed player for: ${player_url}`);
-    }
+const cachedPreprocessed = await preprocessedCache.get(playerFilePath);
 
-    let decrypted_signature = '';
-    let decrypted_n_sig = '';
-
-    for (const r of output.responses) {
-        if (r.type === 'result') {
-            if (encrypted_signature && encrypted_signature in r.data) {
-                decrypted_signature = r.data[encrypted_signature];
-            }
-            if (n_param && n_param in r.data) {
-                decrypted_n_sig = r.data[n_param];
-            }
-        }
-    }
-
-    const response: SignatureResponse = {
-        decrypted_signature,
-        decrypted_n_sig,
-    };
-
-    return new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } });
+let player: string | undefined;
+if (!cachedPreprocessed) {
+  try {
+    player = await fs.readFile(playerFilePath, 'utf8');
+  } catch (err) {
+    return _createErrorResponse('Failed to read player file', 500);
+  }
 }
+
+  const mainInput: MainInput = cachedPreprocessed
+    ? {
+        type: 'preprocessed',
+        preprocessed_player: cachedPreprocessed,
+        requests: [
+          { type: 'sig', challenges: encrypted_signature ? [encrypted_signature] : [] },
+          { type: 'nsig', challenges: n_param ? [n_param] : [] }
+        ]
+      }
+    : {
+        type: 'player',
+        player: player!,
+        output_preprocessed: true,
+        requests: [
+          { type: 'sig', challenges: encrypted_signature ? [encrypted_signature] : [] },
+          { type: 'nsig', challenges: n_param ? [n_param] : [] }
+        ]
+      };
+
+  const output = await execInPool(mainInput);
+
+  if (output.type === 'error') {
+    return _createErrorResponse(output.error, 500);
+  }
+
+  if (output.preprocessed_player && !cachedPreprocessed) {
+    await preprocessedCache.set(playerFilePath, output.preprocessed_player);
+  }
+
+  let decryptedSignature = '';
+  let decryptedNSig = '';
+
+  for (const r of output.responses || []) {
+    if (r.type === 'result') {
+      if (encrypted_signature && encrypted_signature in r.data) {
+        decryptedSignature = r.data[encrypted_signature];
+      }
+      if (n_param && n_param in r.data) {
+        decryptedNSig = r.data[n_param];
+      }
+    }
+  }
+
+  const response: SignatureResponse = {
+    decrypted_signature: decryptedSignature,
+    decrypted_n_sig: decryptedNSig
+  };
+
+  return new Response(JSON.stringify(response), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+};

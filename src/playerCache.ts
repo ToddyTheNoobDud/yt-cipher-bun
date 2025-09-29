@@ -1,37 +1,45 @@
-import { crypto } from "https://deno.land/std@0.140.0/crypto/mod.ts";
-import { ensureDir } from "https://deno.land/std@0.140.0/fs/ensure_dir.ts";
-import { join } from "https://deno.land/std@0.140.0/path/mod.ts";
+import { join } from 'path';
+import fs from 'fs/promises';
 
-export const CACHE_DIR = join(Deno.cwd(), 'player_cache');
+export const CACHE_DIR = join(process.cwd(), 'player_cache');
+
+const hashCache = new Map<string, string>();
+
+const _computeHash = async (playerUrl: string): Promise<string> => {
+  const cached = hashCache.get(playerUrl);
+  if (cached) return cached;
+
+  const buffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(playerUrl));
+  const hash = Array.from(new Uint8Array(buffer), b => b.toString(16).padStart(2, '0')).join('');
+
+  hashCache.set(playerUrl, hash);
+  if (hashCache.size > 200) {
+    const firstKey = hashCache.keys().next().value;
+    hashCache.delete(firstKey);
+  }
+
+  return hash;
+};
 
 export async function getPlayerFilePath(playerUrl: string): Promise<string> {
-    // This hash of the player script url will mean that diff region scripts are treated as unequals, even for the same version #
-    // I dont think I have ever seen 2 scripts of the same version differ between regions but if they ever do this will catch it
-    // As far as player script access, I haven't ever heard about YT ratelimiting those either so ehh
-    const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(playerUrl));
-    const hash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-    const filePath = join(CACHE_DIR, `${hash}.js`);
+  const hash = await _computeHash(playerUrl);
+  const filePath = join(CACHE_DIR, `${hash}.js`);
 
-    try {
-        await Deno.stat(filePath);
-        return filePath;
-    } catch (error) {
-        if (error instanceof Deno.errors.NotFound) {
-            console.log(`Cache miss for player: ${playerUrl}. Fetching...`);
-            const response = await fetch(playerUrl);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch player from ${playerUrl}: ${response.statusText}`);
-            }
-            const playerContent = await response.text();
-            await Deno.writeTextFile(filePath, playerContent);
-            console.log(`Saved player to cache: ${filePath}`);
-            return filePath;
-        }
-        throw error;
+  try {
+    await fs.access(filePath);
+    return filePath;
+  } catch {
+    const response = await fetch(playerUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch player: ${response.statusText}`);
     }
+
+    const content = await response.text();
+    await fs.writeFile(filePath, content, 'utf8');
+    return filePath;
+  }
 }
 
-export async function initializeCache() {
-    await ensureDir(CACHE_DIR);
-    console.log(`Player cache directory ensured at: ${CACHE_DIR}`);
+export async function initializeCache(): Promise<void> {
+  await fs.mkdir(CACHE_DIR, { recursive: true });
 }
