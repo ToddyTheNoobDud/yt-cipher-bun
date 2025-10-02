@@ -3,34 +3,50 @@ import { type DeepPartial } from "./types.ts";
 
 export function matchesStructure<T extends ESTree.Node>(
   obj: ESTree.Node | ESTree.Node[],
-  structure: DeepPartial<T> | readonly DeepPartial<T>[],
+  structure: DeepPartial<T> | readonly DeepPartial<T>[]
 ): boolean {
   if (Array.isArray(structure)) {
     if (!Array.isArray(obj)) {
       return false;
     }
-    return (
-      structure.length === obj.length &&
-      structure.every((value, index) => matchesStructure(obj[index], value))
-    );
+
+    const len = structure.length;
+    if (len !== obj.length) {
+      return false;
+    }
+
+    for (let i = 0; i < len; i++) {
+      if (!matchesStructure(obj[i], structure[i])) {
+        return false;
+      }
+    }
+    return true;
   }
+
   if (typeof structure === "object") {
     if (!obj) {
       return !structure;
     }
+
     if ("or" in structure) {
-      // Handle `{ or: [a, b] }`
-      return (structure as { or: unknown[] }).or.some((node) =>
-        matchesStructure(obj, node)
-      );
+      const orOptions = (structure as { or: unknown[] }).or;
+      for (const option of orOptions) {
+        if (matchesStructure(obj, option)) {
+          return true;
+        }
+      }
+      return false;
     }
-    for (const [key, value] of Object.entries(structure)) {
+
+    for (const key in structure) {
+      const value = structure[key as keyof typeof structure];
       if (!matchesStructure(obj[key as keyof typeof obj], value)) {
         return false;
       }
     }
     return true;
   }
+
   return structure === obj;
 }
 
