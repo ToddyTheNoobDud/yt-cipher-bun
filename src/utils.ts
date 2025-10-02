@@ -1,3 +1,4 @@
+// utils.ts - Optimized URL validation with Set lookup
 const ALLOWED_HOSTNAMES = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
 const PLAYER_PATH_PREFIX = '/s/player/';
 

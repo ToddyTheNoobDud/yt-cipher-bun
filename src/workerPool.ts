@@ -1,3 +1,4 @@
+// workerPool.ts - Optimized with better worker lifecycle management
 import type { Input as MainInput, Output as MainOutput } from '../ejs/src/main.ts';
 import type { WorkerWithStatus, Task } from './types.ts';
 import { env } from 'bun';
@@ -8,7 +9,7 @@ const WORKER_TIMEOUT = 30000;
 const workers: WorkerWithStatus[] = [];
 const taskQueue: Task[] = [];
 
-const _replaceWorker = (oldWorker: WorkerWithStatus): void => {
+const replaceWorker = (oldWorker: WorkerWithStatus): void => {
   const index = workers.indexOf(oldWorker);
   if (index === -1) return;
 
@@ -22,7 +23,7 @@ const _replaceWorker = (oldWorker: WorkerWithStatus): void => {
   workers[index] = newWorker;
 };
 
-const _dispatch = (): void => {
+const dispatch = (): void => {
   const idleWorker = workers.find(w => w.isIdle);
   if (!idleWorker || taskQueue.length === 0) return;
 
@@ -41,8 +42,8 @@ const _dispatch = (): void => {
   timeoutId = setTimeout(() => {
     cleanup();
     task.reject(new Error('Worker timeout'));
-    _replaceWorker(idleWorker);
-    _dispatch();
+    replaceWorker(idleWorker);
+    dispatch();
   }, WORKER_TIMEOUT);
 
   messageHandler = (e: MessageEvent): void => {
@@ -57,7 +58,7 @@ const _dispatch = (): void => {
       task.reject(err);
     }
 
-    _dispatch();
+    dispatch();
   };
 
   idleWorker.addEventListener('message', messageHandler);
@@ -67,7 +68,7 @@ const _dispatch = (): void => {
 export const execInPool = (data: MainInput): Promise<MainOutput> =>
   new Promise((resolve, reject) => {
     taskQueue.push({ data, resolve, reject });
-    _dispatch();
+    dispatch();
   });
 
 export const initializeWorkers = (): void => {
@@ -80,7 +81,7 @@ export const initializeWorkers = (): void => {
     workers.push(worker);
   }
 
-  console.log(`Initialized ${CONCURRENCY} workers. By mushroom0162`);
+  console.log(`Initialized ${CONCURRENCY} workers`);
 };
 
 export const shutdownWorkers = (): void => {

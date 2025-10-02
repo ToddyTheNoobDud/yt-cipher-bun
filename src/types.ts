@@ -1,3 +1,4 @@
+// types.ts - Clean type definitions
 import type { Input as MainInput, Output as MainOutput } from '../ejs/src/main.ts';
 
 export interface SignatureRequest {

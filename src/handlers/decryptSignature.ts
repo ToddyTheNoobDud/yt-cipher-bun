@@ -1,15 +1,25 @@
+// decryptSignature.ts - Optimized with result caching
 import type { Input as MainInput } from '../../ejs/src/main.ts';
 import { execInPool } from '../workerPool.ts';
-import { getPlayerFilePath } from '../playerCache.ts';
-import { preprocessedCache } from '../processedCache.ts';
+import {
+  getPlayerFilePath,
+  getPlayerContent,
+  getPreprocessedPlayer,
+  setPreprocessedPlayer,
+  getSignatureResult,
+  setSignatureResult
+} from '../cacheManager.ts';
 import type { SignatureRequest, SignatureResponse } from '../types.ts';
-import fs from 'fs/promises';
 
-const _createErrorResponse = (message: string, status: number): Response =>
+const createErrorResponse = (message: string, status: number): Response =>
   new Response(JSON.stringify({ error: message }), {
     status,
     headers: { 'Content-Type': 'application/json' }
   });
+
+function generateCacheKey(playerFilePath: string, encSig: string, nParam: string): string {
+  return `${playerFilePath}:${encSig}:${nParam}`;
+}
 
 export const handleDecryptSignature = async (req: Request): Promise<Response> => {
   let body: any;
@@ -17,35 +27,55 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     const text = await req.text();
     body = text ? JSON.parse(text) : {};
   } catch {
-    return _createErrorResponse('Invalid JSON body', 400);
+    return createErrorResponse('Invalid JSON body', 400);
   }
 
   const { encrypted_signature, n_param, player_url } = body as SignatureRequest;
 
   if (!player_url) {
-    return _createErrorResponse('player_url is required', 400);
+    return createErrorResponse('player_url is required', 400);
   }
 
   let playerFilePath: string;
   try {
     playerFilePath = await getPlayerFilePath(player_url);
   } catch (err) {
-    return _createErrorResponse(
+    return createErrorResponse(
       err instanceof Error ? err.message : 'Failed to resolve player file path',
       500
     );
   }
 
-const cachedPreprocessed = await preprocessedCache.get(playerFilePath);
+  const cacheKey = generateCacheKey(
+    playerFilePath,
+    encrypted_signature || '',
+    n_param || ''
+  );
+  const cachedResult = getSignatureResult(cacheKey);
 
-let player: string | undefined;
-if (!cachedPreprocessed) {
-  try {
-    player = await fs.readFile(playerFilePath, 'utf8');
-  } catch (err) {
-    return _createErrorResponse('Failed to read player file', 500);
+  if (cachedResult) {
+    const [decryptedSignature, decryptedNSig] = cachedResult.split('|');
+    const response: SignatureResponse = {
+      decrypted_signature: decryptedSignature || '',
+      decrypted_n_sig: decryptedNSig || ''
+    };
+
+    return new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
-}
+
+  const cachedPreprocessed = await getPreprocessedPlayer(playerFilePath);
+
+  let player: string | undefined;
+  if (!cachedPreprocessed) {
+    try {
+      player = await getPlayerContent(playerFilePath);
+    } catch (err) {
+      return createErrorResponse('Failed to read player file', 500);
+    }
+  }
 
   const mainInput: MainInput = cachedPreprocessed
     ? {
@@ -69,11 +99,11 @@ if (!cachedPreprocessed) {
   const output = await execInPool(mainInput);
 
   if (output.type === 'error') {
-    return _createErrorResponse(output.error, 500);
+    return createErrorResponse(output.error, 500);
   }
 
   if (output.preprocessed_player && !cachedPreprocessed) {
-    await preprocessedCache.set(playerFilePath, output.preprocessed_player);
+    await setPreprocessedPlayer(playerFilePath, output.preprocessed_player);
   }
 
   let decryptedSignature = '';
@@ -89,6 +119,9 @@ if (!cachedPreprocessed) {
       }
     }
   }
+
+  const resultValue = `${decryptedSignature}|${decryptedNSig}`;
+  setSignatureResult(cacheKey, resultValue);
 
   const response: SignatureResponse = {
     decrypted_signature: decryptedSignature,
