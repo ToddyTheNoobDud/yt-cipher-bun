@@ -1,6 +1,7 @@
+// server.ts - Main server with optimized routing and authentication
 import { serve, env } from 'bun';
 import { initializeWorkers, shutdownWorkers } from './src/workerPool.ts';
-import { initializeCache } from './src/playerCache.ts';
+import { initializeAllCaches } from './src/cacheManager.ts';
 import { handleDecryptSignature } from './src/handlers/decryptSignature.ts';
 import { handleGetSts } from './src/handlers/getSts.ts';
 import { withPlayerUrlValidation } from './src/middleware.ts';
@@ -14,42 +15,42 @@ const ROUTES = new Map<string, (req: Request) => Promise<Response>>([
   ['/get_sts', handleGetSts]
 ]);
 
-const _createErrorResponse = (message: string, status: number): Response =>
+const createErrorResponse = (message: string, status: number): Response =>
   new Response(JSON.stringify({ error: message }), {
     status,
     headers: { 'Content-Type': 'application/json' }
   });
 
-const _authenticate = (req: Request): boolean =>
+const authenticate = (req: Request): boolean =>
   !API_TOKEN || req.headers.get('authorization') === API_TOKEN;
 
 const handler = async (req: Request): Promise<Response> => {
-  if (!_authenticate(req)) {
-    return _createErrorResponse(API_TOKEN ? 'Invalid API token' : 'Missing API token', 401);
+  if (!authenticate(req)) {
+    return createErrorResponse(API_TOKEN ? 'Invalid API token' : 'Missing API token', 401);
   }
 
-  const handler = ROUTES.get(new URL(req.url).pathname);
-  if (!handler) {
-    return _createErrorResponse('Not Found', 404);
+  const handlerFn = ROUTES.get(new URL(req.url).pathname);
+  if (!handlerFn) {
+    return createErrorResponse('Not Found', 404);
   }
 
   try {
-    return await withPlayerUrlValidation(handler)(req);
+    return await withPlayerUrlValidation(handlerFn)(req);
   } catch (error) {
-    return _createErrorResponse(
+    return createErrorResponse(
       error instanceof Error ? error.message : 'Unknown error',
       500
     );
   }
 };
 
-const _initialize = async (): Promise<void> => {
-  await initializeCache();
+const initialize = async (): Promise<void> => {
+  await initializeAllCaches();
   initializeWorkers();
 };
 
-const _startServer = async (): Promise<void> => {
-  await _initialize();
+const startServer = async (): Promise<void> => {
+  await initialize();
 
   const server = serve({ fetch: handler, port: PORT });
 
@@ -63,7 +64,6 @@ const _startServer = async (): Promise<void> => {
   process.on('SIGTERM', shutdown);
 };
 
-_startServer().catch((error) => {
-  console.error('Failed to start server:', error);
+startServer().catch((error) => {
   process.exit(1);
 });
