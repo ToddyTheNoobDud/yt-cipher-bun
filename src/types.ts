@@ -1,6 +1,4 @@
-// types.ts - Clean type definitions
-import type { Input as MainInput, Output as MainOutput } from '../ejs/src/main.ts';
-
+// types.ts - Type definitions
 export interface SignatureRequest {
   encrypted_signature: string;
   n_param: string;
@@ -20,12 +18,14 @@ export interface StsResponse {
   sts: string;
 }
 
-export interface WorkerWithStatus extends Worker {
-  isIdle?: boolean;
+export interface ResolveUrlRequest {
+  stream_url: string;
+  player_url: string;
+  encrypted_signature: string;
+  signature_key?: string;
+  n_param?: string;
 }
 
-export interface Task {
-  data: MainInput;
-  resolve: (output: MainOutput) => void;
-  reject: (error: any) => void;
+export interface ResolveUrlResponse {
+  resolved_url: string;
 }

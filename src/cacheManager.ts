@@ -1,387 +1,291 @@
-// cacheManager.ts - Centralized multi-layer caching system with persistent storage
+// cacheManager.ts - Optimized high-performance caching system
 import { join } from 'path';
 import fs from 'fs/promises';
-import { stat } from 'fs/promises';
 
-export const CACHE_DIR = join(process.cwd(), 'player_cache');
+const CACHE_DIR = join(process.cwd(), 'player_cache');
 const PROCESSED_DIR = join(CACHE_DIR, 'processed');
-const METADATA_FILE = join(PROCESSED_DIR, 'metadata.json');
-const PLAYER_METADATA_FILE = join(CACHE_DIR, 'player_metadata.json');
+const META_FILE = join(CACHE_DIR, 'meta.json');
+
+// Constants
+const MEMORY_CACHE_SIZE = 50;
+const DISK_CACHE_SIZE = 100;
+const SIGNATURE_CACHE_SIZE = 500;
+const HASH_CACHE_SIZE = 200;
+const PLAYER_TTL = 172800000; // 2 days
+const CACHE_TTL = 86400000; // 1 day
+const SIG_TTL = 3600000; // 1 hour
+const CLEANUP_INTERVAL = 3600000; // 1 hour
+const META_SAVE_DELAY = 5000; // Batch writes every 5s
 
 interface CacheEntry<T> {
-  value: T;
-  timestamp: number;
-  lastAccessed: number;
+  v: T;
+  t: number;
+  a: number;
 }
 
-interface DiskCacheMetadata {
-  [key: string]: {
-    timestamp: number;
-    lastAccessed: number;
-  };
+interface Metadata {
+  players: Record<string, { url: string; t: number; a: number }>;
+  processed: Record<string, { t: number; a: number }>;
 }
 
-const DEFAULT_MEMORY_CACHE_SIZE = 50;
-const DEFAULT_DISK_CACHE_SIZE = 100;
-const DEFAULT_TTL = 86400000;
-const CLEANUP_INTERVAL = 3600000;
-const PLAYER_FILE_TTL = 259200000;
-
+// Fast LRU cache implementation
 class LRUCache<T> {
-  private cache: Map<string, CacheEntry<T>>;
-  private readonly maxSize: number;
-  private readonly ttl: number;
+  private c = new Map<string, CacheEntry<T>>();
+  private m: number;
+  private ttl: number;
 
-  constructor(maxSize: number = DEFAULT_MEMORY_CACHE_SIZE, ttl: number = DEFAULT_TTL) {
-    this.cache = new Map();
-    this.maxSize = maxSize;
+  constructor(maxSize: number, ttl: number) {
+    this.m = maxSize;
     this.ttl = ttl;
   }
 
-  get(key: string): T | undefined {
-    const entry = this.cache.get(key);
-    if (!entry) return undefined;
+  get(k: string): T | undefined {
+    const e = this.c.get(k);
+    if (!e) return undefined;
 
     const now = Date.now();
-    if (now - entry.timestamp > this.ttl) {
-      this.cache.delete(key);
+    if (now - e.t > this.ttl) {
+      this.c.delete(k);
       return undefined;
     }
 
-    entry.lastAccessed = now;
-    this.cache.delete(key);
-    this.cache.set(key, entry);
-    return entry.value;
+    e.a = now;
+    this.c.delete(k);
+    this.c.set(k, e);
+    return e.v;
   }
 
-  set(key: string, value: T): void {
+  set(k: string, v: T): void {
     const now = Date.now();
-
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } else if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
+    if (this.c.has(k)) {
+      this.c.delete(k);
+    } else if (this.c.size >= this.m) {
+      const firstKey = this.c.keys().next().value;
+      this.c.delete(firstKey);
     }
-
-    this.cache.set(key, { value, timestamp: now, lastAccessed: now });
+    this.c.set(k, { v, t: now, a: now });
   }
 
-  has(key: string): boolean {
-    const entry = this.cache.get(key);
-    if (!entry) return false;
-
-    if (Date.now() - entry.timestamp > this.ttl) {
-      this.cache.delete(key);
+  has(k: string): boolean {
+    const e = this.c.get(k);
+    if (!e) return false;
+    if (Date.now() - e.t > this.ttl) {
+      this.c.delete(k);
       return false;
     }
     return true;
   }
-
-  clear(): void {
-    this.cache.clear();
-  }
 }
 
-class DiskCache {
-  private metadata: DiskCacheMetadata = {};
-  private readonly maxSize: number;
-  private readonly ttl: number;
-  private cleanupTimer?: NodeJS.Timeout;
-  private metadataLoaded = false;
+// Global caches
+const hashCache = new LRUCache<string>(HASH_CACHE_SIZE, Infinity);
+const contentCache = new LRUCache<string>(MEMORY_CACHE_SIZE, CACHE_TTL);
+const sigCache = new LRUCache<string>(SIGNATURE_CACHE_SIZE, SIG_TTL);
+const stsCache = new LRUCache<string>(100, CACHE_TTL);
 
-  constructor(maxSize: number = DEFAULT_DISK_CACHE_SIZE, ttl: number = DEFAULT_TTL) {
-    this.maxSize = maxSize;
-    this.ttl = ttl;
-    this.startCleanupTimer();
-  }
+let metadata: Metadata = { players: {}, processed: {} };
+let metaLoaded = false;
+let metaDirty = false;
+let saveTimer: NodeJS.Timeout | undefined;
 
-  private async ensureDir(): Promise<void> {
-    await fs.mkdir(PROCESSED_DIR, { recursive: true });
-  }
-
-  private async loadMetadata(): Promise<void> {
-    if (this.metadataLoaded) return;
-
-    await this.ensureDir();
-
-    try {
-      const data = await fs.readFile(METADATA_FILE, 'utf8');
-      this.metadata = JSON.parse(data);
-    } catch (err: any) {
-      if (err.code !== 'ENOENT') return;
-      this.metadata = {};
-    }
-
-    this.metadataLoaded = true;
-  }
-
-  private async saveMetadata(): Promise<void> {
-    await this.ensureDir();
-    await fs.writeFile(METADATA_FILE, JSON.stringify(this.metadata), 'utf8');
-  }
-
-  private getFilePath(key: string): string {
-    const hash = key.split('/').pop()?.replace('.js', '') || '';
-    return join(PROCESSED_DIR, `${hash}_processed.js`);
-  }
-
-  async get(key: string): Promise<string | undefined> {
-    await this.loadMetadata();
-
-    const entry = this.metadata[key];
-    if (!entry) return undefined;
-
-    const now = Date.now();
-    if (now - entry.timestamp > this.ttl) {
-      await this.deleteFile(key);
-      return undefined;
-    }
-
-    const filePath = this.getFilePath(key);
-    try {
-      const data = await fs.readFile(filePath, 'utf8');
-      entry.lastAccessed = now;
-      await this.saveMetadata();
-      return data;
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        delete this.metadata[key];
-        await this.saveMetadata();
-      }
-      return undefined;
-    }
-  }
-
-  async set(key: string, data: string): Promise<void> {
-    await this.loadMetadata();
-
-    if (Object.keys(this.metadata).length >= this.maxSize && !(key in this.metadata)) {
-      await this.evictLRU();
-    }
-
-    const filePath = this.getFilePath(key);
-    await fs.writeFile(filePath, data, 'utf8');
-
-    this.metadata[key] = {
-      timestamp: Date.now(),
-      lastAccessed: Date.now()
-    };
-    await this.saveMetadata();
-  }
-
-  async has(key: string): Promise<boolean> {
-    await this.loadMetadata();
-
-    const entry = this.metadata[key];
-    if (!entry) return false;
-
-    if (Date.now() - entry.timestamp > this.ttl) {
-      await this.deleteFile(key);
-      return false;
-    }
-
-    const filePath = this.getFilePath(key);
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      await this.deleteFile(key);
-      return false;
-    }
-  }
-
-  private async deleteFile(key: string): Promise<void> {
-    const filePath = this.getFilePath(key);
-    try {
-      await fs.unlink(filePath);
-    } catch {}
-    delete this.metadata[key];
-    await this.saveMetadata();
-  }
-
-  private async evictLRU(): Promise<void> {
-    let lruKey: string | null = null;
-    let lruTime = Infinity;
-
-    for (const [key, entry] of Object.entries(this.metadata)) {
-      if (entry.lastAccessed < lruTime) {
-        lruTime = entry.lastAccessed;
-        lruKey = key;
-      }
-    }
-
-    if (lruKey) await this.deleteFile(lruKey);
-  }
-
-  private startCleanupTimer(): void {
-    this.cleanupTimer = setInterval(async () => {
-      await this.loadMetadata();
-
-      const now = Date.now();
-      for (const [key, entry] of Object.entries(this.metadata)) {
-        if (now - entry.timestamp > this.ttl) {
-          await this.deleteFile(key);
-        }
-      }
-    }, CLEANUP_INTERVAL);
-
-    if (this.cleanupTimer.unref) this.cleanupTimer.unref();
-  }
-
-  async destroy(): Promise<void> {
-    if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
-      this.cleanupTimer = undefined;
-    }
-  }
-}
-
-const playerUrlHashCache = new LRUCache<string>(200, Infinity);
-const playerContentCache = new LRUCache<string>(20, DEFAULT_TTL);
-const preprocessedCache = new DiskCache(100, DEFAULT_TTL);
-const signatureResultCache = new LRUCache<string>(500, 3600000);
-const stsCache = new LRUCache<string>(100, DEFAULT_TTL);
-
-interface PlayerFileMetadata {
-  [hash: string]: {
-    playerUrl: string;
-    timestamp: number;
-    lastAccessed: number;
-  };
-}
-
-let playerMetadata: PlayerFileMetadata = {};
-
-async function computeHash(playerUrl: string): Promise<string> {
-  const cached = playerUrlHashCache.get(playerUrl);
+// Fast hash computation with caching
+const _hash = async (s: string): Promise<string> => {
+  const cached = hashCache.get(s);
   if (cached) return cached;
 
-  const buffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(playerUrl));
-  const hash = Array.from(new Uint8Array(buffer), b => b.toString(16).padStart(2, '0')).join('');
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  const h = Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
+  hashCache.set(s, h);
+  return h;
+};
 
-  playerUrlHashCache.set(playerUrl, hash);
-  return hash;
-}
+// Lazy metadata loading
+const _loadMeta = async (): Promise<void> => {
+  if (metaLoaded) return;
 
-async function loadPlayerMetadata(): Promise<void> {
   try {
-    const data = await fs.readFile(PLAYER_METADATA_FILE, 'utf8');
-    playerMetadata = JSON.parse(data);
+    const data = await fs.readFile(META_FILE, 'utf8');
+    metadata = JSON.parse(data);
   } catch (err: any) {
-    if (err.code !== 'ENOENT') return;
-    playerMetadata = {};
+    if (err.code !== 'ENOENT') throw err;
+    metadata = { players: {}, processed: {} };
   }
-}
+  metaLoaded = true;
+};
 
-async function savePlayerMetadata(): Promise<void> {
-  await fs.writeFile(PLAYER_METADATA_FILE, JSON.stringify(playerMetadata), 'utf8');
-}
+// Batched metadata saving
+const _saveMeta = async (): Promise<void> => {
+  if (!metaDirty) return;
+  await fs.writeFile(META_FILE, JSON.stringify(metadata), 'utf8');
+  metaDirty = false;
+};
 
-async function cleanupExpiredPlayerFiles(): Promise<void> {
+const _scheduleSave = (): void => {
+  if (saveTimer) return;
+  metaDirty = true;
+  saveTimer = setTimeout(async () => {
+    await _saveMeta();
+    saveTimer = undefined;
+  }, META_SAVE_DELAY);
+  if (saveTimer.unref) saveTimer.unref();
+};
+
+// Cleanup expired entries
+const _cleanup = async (): Promise<void> => {
+  await _loadMeta();
   const now = Date.now();
-  const filesToDelete: string[] = [];
+  const toDelete: string[] = [];
 
-  for (const [hash, meta] of Object.entries(playerMetadata)) {
-    if (now - meta.timestamp > PLAYER_FILE_TTL) {
-      filesToDelete.push(hash);
+  for (const [hash, meta] of Object.entries(metadata.players)) {
+    if (now - meta.t > PLAYER_TTL) {
+      toDelete.push(hash);
+      try {
+        await fs.unlink(join(CACHE_DIR, `${hash}.js`));
+      } catch {}
     }
   }
 
-  for (const hash of filesToDelete) {
-    const filePath = join(CACHE_DIR, `${hash}.js`);
-    try {
-      await fs.unlink(filePath);
-      delete playerMetadata[hash];
-    } catch {}
+  for (const [key, meta] of Object.entries(metadata.processed)) {
+    if (now - meta.t > CACHE_TTL) {
+      const hash = key.split('/').pop()?.replace('.js', '') || '';
+      try {
+        await fs.unlink(join(PROCESSED_DIR, `${hash}_processed.js`));
+      } catch {}
+      delete metadata.processed[key];
+    }
   }
 
-  if (filesToDelete.length > 0) {
-    await savePlayerMetadata();
+  for (const hash of toDelete) {
+    delete metadata.players[hash];
   }
-}
 
-const playerCleanupTimer = setInterval(cleanupExpiredPlayerFiles, CLEANUP_INTERVAL);
-if (playerCleanupTimer.unref) playerCleanupTimer.unref();
+  if (toDelete.length > 0) {
+    metaDirty = true;
+    await _saveMeta();
+  }
+};
 
-export async function getPlayerFilePath(playerUrl: string): Promise<string> {
-  const hash = await computeHash(playerUrl);
+const cleanupTimer = setInterval(_cleanup, CLEANUP_INTERVAL);
+if (cleanupTimer.unref) cleanupTimer.unref();
+
+// Public API
+export const getPlayerFilePath = async (url: string): Promise<string> => {
+  const hash = await _hash(url);
   const filePath = join(CACHE_DIR, `${hash}.js`);
-
   const now = Date.now();
 
-  if (playerMetadata[hash]) {
-    playerMetadata[hash].lastAccessed = now;
+  await _loadMeta();
 
-    if (now - playerMetadata[hash].timestamp <= PLAYER_FILE_TTL) {
+  if (metadata.players[hash]) {
+    metadata.players[hash].a = now;
+    if (now - metadata.players[hash].t <= PLAYER_TTL) {
       try {
         await fs.access(filePath);
-        await savePlayerMetadata();
+        _scheduleSave();
         return filePath;
       } catch {
-        delete playerMetadata[hash];
+        delete metadata.players[hash];
       }
     } else {
       try {
         await fs.unlink(filePath);
       } catch {}
-      delete playerMetadata[hash];
+      delete metadata.players[hash];
     }
   }
 
-  const response = await fetch(playerUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch player: ${response.statusText}`);
-  }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch player: ${res.statusText}`);
 
-  const content = await response.text();
+  const content = await res.text();
   await fs.writeFile(filePath, content, 'utf8');
 
-  playerMetadata[hash] = {
-    playerUrl,
-    timestamp: now,
-    lastAccessed: now
-  };
-  await savePlayerMetadata();
+  metadata.players[hash] = { url, t: now, a: now };
+  _scheduleSave();
 
   return filePath;
-}
+};
 
-export async function getPlayerContent(playerFilePath: string): Promise<string> {
-  const cached = playerContentCache.get(playerFilePath);
+export const getPlayerContent = async (path: string): Promise<string> => {
+  const cached = contentCache.get(path);
   if (cached) return cached;
 
-  const content = await fs.readFile(playerFilePath, 'utf8');
-  playerContentCache.set(playerFilePath, content);
+  const content = await fs.readFile(path, 'utf8');
+  contentCache.set(path, content);
   return content;
-}
+};
 
-export async function getPreprocessedPlayer(playerFilePath: string): Promise<string | undefined> {
-  return await preprocessedCache.get(playerFilePath);
-}
+export const getPreprocessed = async (path: string): Promise<string | undefined> => {
+  await _loadMeta();
+  const meta = metadata.processed[path];
+  if (!meta) return undefined;
 
-export async function setPreprocessedPlayer(playerFilePath: string, data: string): Promise<void> {
-  await preprocessedCache.set(playerFilePath, data);
-}
+  const now = Date.now();
+  if (now - meta.t > CACHE_TTL) {
+    const hash = path.split('/').pop()?.replace('.js', '') || '';
+    const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+    try {
+      await fs.unlink(file);
+    } catch {}
+    delete metadata.processed[path];
+    _scheduleSave();
+    return undefined;
+  }
 
-export function getSignatureResult(cacheKey: string): string | undefined {
-  return signatureResultCache.get(cacheKey);
-}
+  const hash = path.split('/').pop()?.replace('.js', '') || '';
+  const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+  try {
+    const data = await fs.readFile(file, 'utf8');
+    meta.a = now;
+    _scheduleSave();
+    return data;
+  } catch {
+    delete metadata.processed[path];
+    _scheduleSave();
+    return undefined;
+  }
+};
 
-export function setSignatureResult(cacheKey: string, result: string): void {
-  signatureResultCache.set(cacheKey, result);
-}
+export const setPreprocessed = async (path: string, data: string): Promise<void> => {
+  await _loadMeta();
 
-export function getStsValue(playerFilePath: string): string | undefined {
-  return stsCache.get(playerFilePath);
-}
+  const keys = Object.keys(metadata.processed);
+  if (keys.length >= DISK_CACHE_SIZE && !(path in metadata.processed)) {
+    let lruKey: string | null = null;
+    let lruTime = Infinity;
+    for (const [k, m] of Object.entries(metadata.processed)) {
+      if (m.a < lruTime) {
+        lruTime = m.a;
+        lruKey = k;
+      }
+    }
+    if (lruKey) {
+      const hash = lruKey.split('/').pop()?.replace('.js', '') || '';
+      const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+      try {
+        await fs.unlink(file);
+      } catch {}
+      delete metadata.processed[lruKey];
+    }
+  }
 
-export function setStsValue(playerFilePath: string, sts: string): void {
-  stsCache.set(playerFilePath, sts);
-}
+  const hash = path.split('/').pop()?.replace('.js', '') || '';
+  const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+  await fs.writeFile(file, data, 'utf8');
 
-export async function initializeAllCaches(): Promise<void> {
+  const now = Date.now();
+  metadata.processed[path] = { t: now, a: now };
+  _scheduleSave();
+};
+
+export const getSignature = (key: string): string | undefined => sigCache.get(key);
+export const setSignature = (key: string, value: string): void => sigCache.set(key, value);
+export const getSts = (path: string): string | undefined => stsCache.get(path);
+export const setSts = (path: string, sts: string): void => stsCache.set(path, sts);
+
+export const initCaches = async (): Promise<void> => {
   await fs.mkdir(CACHE_DIR, { recursive: true });
-  await loadPlayerMetadata();
-  await cleanupExpiredPlayerFiles();
-}
+  await fs.mkdir(PROCESSED_DIR, { recursive: true });
+  await _loadMeta();
+  await _cleanup();
+};
