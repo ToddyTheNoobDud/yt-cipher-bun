@@ -1,17 +1,17 @@
-// worker.ts - Clean worker implementation
-import main from './ejs/src/main.ts';
+import { preprocessPlayer } from "./ejs/src/solvers.ts";
 
-self.onmessage = (e) => {
-  try {
-    const output = main(e.data);
-    self.postMessage({ type: 'success', data: output });
-  } catch (error) {
-    self.postMessage({
-      type: 'error',
-      data: {
-        message: error.message,
-        stack: error.stack
-      }
-    });
-  }
+self.onmessage = (e: MessageEvent<string>) => {
+    try {
+        const output = preprocessPlayer(e.data);
+        self.postMessage({ type: 'success', data: output });
+    } catch (error) {
+        const err = error as Error;
+        self.postMessage({
+            type: 'error',
+            data: {
+                message: err.message,
+                stack: err.stack,
+            }
+        });
+    }
 };

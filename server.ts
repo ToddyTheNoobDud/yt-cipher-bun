@@ -1,57 +1,50 @@
-// server.ts - Main server with optimized routing and authentication
+// server.ts - Optimized server with minimal overhead
 import { serve, env } from 'bun';
-import { initializeWorkers, shutdownWorkers } from './src/workerPool.ts';
-import { initializeAllCaches } from './src/cacheManager.ts';
+import { initWorkers, shutdownWorkers } from './src/workerPool.ts';
+import { initCaches } from './src/cacheManager.ts';
 import { handleDecryptSignature } from './src/handlers/decryptSignature.ts';
 import { handleGetSts } from './src/handlers/getSts.ts';
-import { withPlayerUrlValidation } from './src/middleware.ts';
+import { handleResolveUrl } from './src/handlers/resolveUrl.ts';
+import { withValidation } from './src/middleware.ts';
 
 const API_TOKEN = env.API_TOKEN || '';
 const PORT = parseInt(env.PORT || '8001', 10);
-const HOST = env.HOST || '127.0.0.1';
 
-const ROUTES = new Map<string, (req: Request) => Promise<Response>>([
+const ROUTES = new Map([
   ['/decrypt_signature', handleDecryptSignature],
-  ['/get_sts', handleGetSts]
+  ['/get_sts', handleGetSts],
+  ['/resolve_url', handleResolveUrl]
 ]);
 
-const createErrorResponse = (message: string, status: number): Response =>
-  new Response(JSON.stringify({ error: message }), {
+const _error = (msg: string, status: number): Response =>
+  new Response(JSON.stringify({ error: msg }), {
     status,
     headers: { 'Content-Type': 'application/json' }
   });
 
-const authenticate = (req: Request): boolean =>
+const _auth = (req: Request): boolean =>
   !API_TOKEN || req.headers.get('authorization') === API_TOKEN;
 
 const handler = async (req: Request): Promise<Response> => {
-  if (!authenticate(req)) {
-    return createErrorResponse(API_TOKEN ? 'Invalid API token' : 'Missing API token', 401);
-  }
+  if (!_auth(req)) return _error(API_TOKEN ? 'Invalid API token' : 'Missing API token', 401);
 
-  const handlerFn = ROUTES.get(new URL(req.url).pathname);
-  if (!handlerFn) {
-    return createErrorResponse('Not Found', 404);
-  }
+  const fn = ROUTES.get(new URL(req.url).pathname);
+  if (!fn) return _error('Not Found', 404);
 
   try {
-    return await withPlayerUrlValidation(handlerFn)(req);
+    return await withValidation(fn)(req);
   } catch (error) {
-    return createErrorResponse(
-      error instanceof Error ? error.message : 'Unknown error',
-      500
-    );
+    return _error(error instanceof Error ? error.message : 'Unknown error', 500);
   }
 };
 
-const initialize = async (): Promise<void> => {
-  await initializeAllCaches();
-  initializeWorkers();
+const init = async (): Promise<void> => {
+  await initCaches();
+  initWorkers();
 };
 
-const startServer = async (): Promise<void> => {
-  await initialize();
-
+const start = async (): Promise<void> => {
+  await init();
   const server = serve({ fetch: handler, port: PORT });
 
   const shutdown = (): void => {
@@ -64,6 +57,4 @@ const startServer = async (): Promise<void> => {
   process.on('SIGTERM', shutdown);
 };
 
-startServer().catch((error) => {
-  process.exit(1);
-});
+start().catch(() => process.exit(1));
