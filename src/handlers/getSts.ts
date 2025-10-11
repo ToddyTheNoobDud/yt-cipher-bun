@@ -1,16 +1,16 @@
-// getSts.ts - Optimized with compiled regex and integrated caching
+// getSts.ts - Optimized with compiled regex
 import {
   getPlayerFilePath,
   getPlayerContent,
-  getStsValue,
-  setStsValue
+  getSts,
+  setSts
 } from '../cacheManager.ts';
 import type { StsRequest, StsResponse } from '../types.ts';
 
 const STS_REGEX = /(?:signatureTimestamp|sts):(\d+)/;
 
-const createErrorResponse = (message: string, status: number): Response =>
-  new Response(JSON.stringify({ error: message }), {
+const _error = (msg: string, status: number): Response =>
+  new Response(JSON.stringify({ error: msg }), {
     status,
     headers: { 'Content-Type': 'application/json' }
   });
@@ -21,51 +21,44 @@ export const handleGetSts = async (req: Request): Promise<Response> => {
     const text = await req.text();
     body = text ? JSON.parse(text) : {};
   } catch {
-    return createErrorResponse('Invalid JSON body', 400);
+    return _error('Invalid JSON body', 400);
   }
 
   const { player_url } = body as StsRequest;
 
-  if (!player_url) {
-    return createErrorResponse('player_url is required', 400);
-  }
+  if (!player_url) return _error('player_url is required', 400);
 
-  let playerFilePath: string;
+  let path: string;
   try {
-    playerFilePath = await getPlayerFilePath(player_url);
+    path = await getPlayerFilePath(player_url);
   } catch (err) {
-    return createErrorResponse(
-      err instanceof Error ? err.message : 'Failed to resolve player file path',
-      500
-    );
+    return _error(err instanceof Error ? err.message : 'Failed to resolve player file path', 500);
   }
 
-  const cached = getStsValue(playerFilePath);
+  const cached = getSts(path);
   if (cached) {
-    const response: StsResponse = { sts: cached };
-    return new Response(JSON.stringify(response), {
+    const res: StsResponse = { sts: cached };
+    return new Response(JSON.stringify(res), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  let playerContent: string;
+  let content: string;
   try {
-    playerContent = await getPlayerContent(playerFilePath);
+    content = await getPlayerContent(path);
   } catch {
-    return createErrorResponse('Failed to read player file', 500);
+    return _error('Failed to read player file', 500);
   }
 
-  const match = playerContent.match(STS_REGEX);
-  if (!match?.[1]) {
-    return createErrorResponse('Timestamp not found in player script', 404);
-  }
+  const match = content.match(STS_REGEX);
+  if (!match?.[1]) return _error('Timestamp not found in player script', 404);
 
   const sts = match[1];
-  setStsValue(playerFilePath, sts);
+  setSts(path, sts);
 
-  const response: StsResponse = { sts };
-  return new Response(JSON.stringify(response), {
+  const res: StsResponse = { sts };
+  return new Response(JSON.stringify(res), {
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   });
