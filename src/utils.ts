@@ -1,4 +1,4 @@
-// utils.ts - Optimized URL validation with Set lookup
+
 const HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
 const PATH_PREFIX = '/s/player/';
 
@@ -26,7 +26,6 @@ export function extractPlayerId(playerUrl: string): string {
             return pathParts[playerIndex + 1];
         }
     } catch (e) {
-        // Fallback for relative paths
         const match = playerUrl.match(/\/s\/player\/([^\/]+)/);
         if (match) {
             return match[1];
@@ -34,3 +33,4 @@ export function extractPlayerId(playerUrl: string): string {
     }
     return 'unknown';
 }
+
