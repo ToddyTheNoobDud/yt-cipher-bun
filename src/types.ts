@@ -21,7 +21,7 @@ export interface StsResponse {
 export interface ResolveUrlRequest {
   stream_url: string;
   player_url: string;
-  encrypted_signature: string;
+  encrypted_signature?: string;
   signature_key?: string;
   n_param?: string;
 }
@@ -29,3 +29,15 @@ export interface ResolveUrlRequest {
 export interface ResolveUrlResponse {
   resolved_url: string;
 }
+
+export interface Solvers {
+  n: ((val: string) => string) | null;
+  sig: ((val: string) => string) | null;
+}
+
+export interface RequestContext {
+  req: Request;
+  body: ApiRequest;
+}
+
+export type ApiRequest = SignatureRequest | StsRequest | ResolveUrlRequest;

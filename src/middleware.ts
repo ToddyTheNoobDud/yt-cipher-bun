@@ -56,6 +56,12 @@ export const withValidation = (handler: Next): Next => {
 
     if (req.method !== 'POST') return handler(req);
 
+    // For resolve_url endpoint, skip body validation to avoid consuming the body
+    const requestUrl = new URL(req.url);
+    if (requestUrl.pathname === '/resolve_url') {
+      return handler(req);
+    }
+
     let body: any;
     try {
       const text = await req.text();
@@ -66,9 +72,9 @@ export const withValidation = (handler: Next): Next => {
 
     if (!body.player_url) return _error('player_url is required', 400);
 
-    let url: string;
+    let validatedUrl: string;
     try {
-      url = validateUrl(body.player_url);
+      validatedUrl = validateUrl(body.player_url);
     } catch (error) {
       return _error(error instanceof Error ? error.message : 'Invalid player URL', 400);
     }
@@ -76,7 +82,7 @@ export const withValidation = (handler: Next): Next => {
     const newReq = new Request(req.url, {
       method: req.method,
       headers: req.headers,
-      body: JSON.stringify({ ...body, player_url: url })
+      body: JSON.stringify({ ...body, player_url: validatedUrl })
     });
 
     return handler(newReq);
