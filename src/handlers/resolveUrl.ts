@@ -134,24 +134,68 @@ const _decryptNParam = async (player_url: string, n_param: string): Promise<stri
 
 export const handleResolveUrl = async (req: Request): Promise<Response> => {
   let body: any;
+  let rawText: string = '';
+
   try {
-    const text = await req.text();
-    body = text ? JSON.parse(text) : {};
-  } catch {
+    rawText = await req.text();
+    body = rawText ? JSON.parse(rawText) : {};
+  } catch (parseError) {
+    console.error('Failed to parse request body:', rawText, parseError);
     return _error('Invalid JSON body', 400);
   }
 
+
   const { stream_url, player_url, encrypted_signature, signature_key, n_param: nParamFromRequest } = body as ResolveUrlRequest;
 
-  if (!stream_url) return _error('stream_url is required', 400);
-  if (!player_url) return _error('player_url is required', 400);
-  if (!encrypted_signature) return _error('encrypted_signature is required', 400);
+  if (!stream_url) {
+    console.error('Missing stream_url in request body:', body);
+    return _error('stream_url is required', 400);
+  }
+  if (!player_url) {
+    console.error('Missing player_url in request body:', body);
+    return _error('player_url is required', 400);
+  }
 
-  const url = new URL(stream_url);
+  // Validate and normalize URLs
+  let normalizedPlayerUrl = player_url;
+  try {
+    // Handle relative player URLs by converting them to absolute URLs
+    if (player_url.startsWith('/s/player/')) {
+      normalizedPlayerUrl = `https://www.youtube.com${player_url}`;
+    } else {
+      // Validate absolute URLs
+      new URL(player_url);
+    }
+  } catch (urlError) {
+    console.warn('Player URL validation warning:', urlError);
+    // For player URLs, try to handle as relative path
+    if (player_url.startsWith('/s/player/')) {
+      normalizedPlayerUrl = `https://www.youtube.com${player_url}`;
+    } else {
+      console.error('Invalid player_url format:', player_url);
+      return _error('Invalid player_url format', 400);
+    }
+  }
 
-  // Decrypt signature if provided
+  // Validate stream URL
+  try {
+    new URL(stream_url);
+  } catch (urlError) {
+    console.error('Invalid stream_url format:', stream_url, urlError);
+    return _error('Invalid stream_url format', 400);
+  }
+
+  let url: URL;
+  try {
+    url = new URL(stream_url);
+  } catch (urlError) {
+    console.error('Failed to parse stream_url:', stream_url, urlError);
+    return _error('Invalid stream_url format', 400);
+  }
+
+  // Decrypt signature if provided (make it optional for compatibility)
   if (encrypted_signature) {
-    const decryptedSig = await _decryptSignature(player_url, encrypted_signature);
+    const decryptedSig = await _decryptSignature(normalizedPlayerUrl, encrypted_signature);
     if (!decryptedSig) {
       return _error('Failed to decrypt signature', 500);
     }
@@ -167,7 +211,7 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
   }
 
   if (nParam) {
-    const decryptedN = await _decryptNParam(player_url, nParam);
+    const decryptedN = await _decryptNParam(normalizedPlayerUrl, nParam);
     if (!decryptedN) {
       return _error('Failed to decrypt n parameter', 500);
     }
