@@ -1,4 +1,4 @@
-// resolveUrl.ts - Optimized URL resolution with signature and n-parameter decryption
+
 import main from '../../ejs/src/main.ts';
 import {
   getPlayerFilePath,
@@ -106,7 +106,7 @@ const _decryptNParam = async (player_url: string, n_param: string): Promise<stri
           player: player!,
           output_preprocessed: true,
           requests: [
-            { type: 'nsig' as const, challenges: [n_param] }
+            { type: 'nsig' as const, challenges: [n_param] } // somehow the N only din't work for me, so i'll just keep using nsig for now
           ]
         };
 
@@ -118,7 +118,6 @@ const _decryptNParam = async (player_url: string, n_param: string): Promise<stri
       await setPreprocessed(path, output.preprocessed_player);
     }
 
-    // Extract the decrypted n parameter from the response
     for (const response of output.responses) {
       if (response.type === 'result' && n_param in response.data) {
         return response.data[n_param];
@@ -156,14 +155,11 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
     return _error('player_url is required', 400);
   }
 
-  // Validate and normalize URLs
   let normalizedPlayerUrl = player_url;
   try {
-    // Handle relative player URLs by converting them to absolute URLs
     if (player_url.startsWith('/s/player/')) {
       normalizedPlayerUrl = `https://www.youtube.com${player_url}`;
     } else {
-      // Validate absolute URLs
       new URL(player_url);
     }
   } catch (urlError) {
@@ -177,7 +173,6 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
     }
   }
 
-  // Validate stream URL
   try {
     new URL(stream_url);
   } catch (urlError) {
@@ -193,7 +188,6 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
     return _error('Invalid stream_url format', 400);
   }
 
-  // Decrypt signature if provided (make it optional for compatibility)
   if (encrypted_signature) {
     const decryptedSig = await _decryptSignature(normalizedPlayerUrl, encrypted_signature);
     if (!decryptedSig) {
@@ -204,7 +198,6 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
     url.searchParams.delete('s');
   }
 
-  // Decrypt n parameter if provided or found in URL
   let nParam = nParamFromRequest || null;
   if (!nParam) {
     nParam = url.searchParams.get('n');
