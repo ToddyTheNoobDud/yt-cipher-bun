@@ -1,4 +1,3 @@
-// decryptSignature.ts - Optimized with efficient caching
 import type { Input } from '../../ejs/src/main.ts';
 import { execInPool } from '../workerPool.ts';
 import {
@@ -118,4 +117,5 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   });
+
 };
