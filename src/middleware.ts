@@ -1,4 +1,4 @@
-// middleware.ts - Optimized with efficient rate limiting
+
 import { validateUrl } from './utils.ts';
 
 type Next = (req: Request) => Promise<Response>;
@@ -56,7 +56,6 @@ export const withValidation = (handler: Next): Next => {
 
     if (req.method !== 'POST') return handler(req);
 
-    // For resolve_url endpoint, skip body validation to avoid consuming the body
     const requestUrl = new URL(req.url);
     if (requestUrl.pathname === '/resolve_url') {
       return handler(req);
@@ -88,3 +87,4 @@ export const withValidation = (handler: Next): Next => {
     return handler(newReq);
   };
 };
+
