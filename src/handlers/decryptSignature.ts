@@ -4,9 +4,7 @@ import {
   getPlayerFilePath,
   getPlayerContent,
   getPreprocessed,
-  setPreprocessed,
-  getSignature,
-  setSignature
+  setPreprocessed
 } from '../cacheManager.ts';
 import type { SignatureRequest, SignatureResponse } from '../types.ts';
 
@@ -15,8 +13,6 @@ const _error = (msg: string, status: number): Response =>
     status,
     headers: { 'Content-Type': 'application/json' }
   });
-
-const _key = (path: string, sig: string, n: string): string => `${path}:${sig}:${n}`;
 
 export const handleDecryptSignature = async (req: Request): Promise<Response> => {
   let body: any;
@@ -38,21 +34,7 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     return _error(err instanceof Error ? err.message : 'Failed to resolve player file path', 500);
   }
 
-  const key = _key(path, encrypted_signature || '', n_param || '');
-  const cached = getSignature(key);
-
-  if (cached) {
-    const [sig, nsig] = cached.split('|');
-    const res: SignatureResponse = {
-      decrypted_signature: sig || '',
-      decrypted_n_sig: nsig || ''
-    };
-    return new Response(JSON.stringify(res), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
+  // Only cache the preprocessed player script, not individual song requests
   const preprocessed = await getPreprocessed(path);
 
   let player: string | undefined;
@@ -105,9 +87,6 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     }
   }
 
-  const value = `${sig}|${nsig}`;
-  setSignature(key, value);
-
   const res: SignatureResponse = {
     decrypted_signature: sig,
     decrypted_n_sig: nsig
@@ -117,5 +96,4 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   });
-
 };
