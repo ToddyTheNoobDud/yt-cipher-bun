@@ -1,6 +1,7 @@
-// cacheManager.ts - Optimized high-performance caching system
+// cacheManager.ts - Zstandard compression for Bun 1.3 lol
 import { join } from 'path';
 import fs from 'fs/promises';
+import { zstdCompress, zstdDecompress } from 'bun';
 
 const CACHE_DIR = join(process.cwd(), 'player_cache');
 const PROCESSED_DIR = join(CACHE_DIR, 'processed');
@@ -15,7 +16,8 @@ const PLAYER_TTL = 172800000; // 2 days
 const CACHE_TTL = 86400000; // 1 day
 const SIG_TTL = 3600000; // 1 hour
 const CLEANUP_INTERVAL = 3600000; // 1 hour
-const META_SAVE_DELAY = 5000; // Batch writes every 5s
+const META_SAVE_DELAY = 5000;
+const COMPRESSION_THRESHOLD = 1024; // Compress files larger than 1KB
 
 interface CacheEntry<T> {
   v: T;
@@ -24,8 +26,8 @@ interface CacheEntry<T> {
 }
 
 interface Metadata {
-  players: Record<string, { url: string; t: number; a: number }>;
-  processed: Record<string, { t: number; a: number }>;
+  players: Record<string, { url: string; t: number; a: number; compressed?: boolean }>;
+  processed: Record<string, { t: number; a: number; compressed?: boolean }>;
 }
 
 // Fast LRU cache implementation
@@ -99,6 +101,29 @@ const _hash = async (s: string): Promise<string> => {
   return h;
 };
 
+// Compression helpers using Bun 1.3's native zstd
+const _shouldCompress = (content: string): boolean => {
+  return content.length > COMPRESSION_THRESHOLD;
+};
+
+const _compressContent = async (content: string): Promise<{ data: Uint8Array; compressed: boolean }> => {
+  if (!_shouldCompress(content)) {
+    return { data: new TextEncoder().encode(content), compressed: false };
+  }
+
+  const compressed = await zstdCompress(content);
+  return { data: compressed, compressed: true };
+};
+
+const _decompressContent = async (data: Uint8Array, compressed: boolean): Promise<string> => {
+  if (!compressed) {
+    return new TextDecoder().decode(data);
+  }
+
+  const decompressed = await zstdDecompress(data);
+  return new TextDecoder().decode(decompressed);
+};
+
 // Lazy metadata loading
 const _loadMeta = async (): Promise<void> => {
   if (metaLoaded) return;
@@ -140,7 +165,7 @@ const _cleanup = async (): Promise<void> => {
     if (now - meta.t > PLAYER_TTL) {
       toDelete.push(hash);
       try {
-        await fs.unlink(join(CACHE_DIR, `${hash}.js`));
+        await fs.unlink(join(CACHE_DIR, `${hash}.js${meta.compressed ? '.zst' : ''}`));
       } catch {}
     }
   }
@@ -149,7 +174,7 @@ const _cleanup = async (): Promise<void> => {
     if (now - meta.t > CACHE_TTL) {
       const hash = key.split('/').pop()?.replace('.js', '') || '';
       try {
-        await fs.unlink(join(PROCESSED_DIR, `${hash}_processed.js`));
+        await fs.unlink(join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`));
       } catch {}
       delete metadata.processed[key];
     }
@@ -171,7 +196,7 @@ if (cleanupTimer.unref) cleanupTimer.unref();
 // Public API
 export const getPlayerFilePath = async (url: string): Promise<string> => {
   const hash = await _hash(url);
-  const filePath = join(CACHE_DIR, `${hash}.js`);
+  const baseFilePath = join(CACHE_DIR, `${hash}.js`);
   const now = Date.now();
 
   await _loadMeta();
@@ -179,15 +204,21 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
   if (metadata.players[hash]) {
     metadata.players[hash].a = now;
     if (now - metadata.players[hash].t <= PLAYER_TTL) {
+      const filePath = metadata.players[hash].compressed
+        ? `${baseFilePath}.zst`
+        : baseFilePath;
       try {
         await fs.access(filePath);
         _scheduleSave();
-        return filePath;
+        return baseFilePath; // Return base path, compression is handled internally
       } catch {
         delete metadata.players[hash];
       }
     } else {
       try {
+        const filePath = metadata.players[hash].compressed
+          ? `${baseFilePath}.zst`
+          : baseFilePath;
         await fs.unlink(filePath);
       } catch {}
       delete metadata.players[hash];
@@ -198,19 +229,32 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
   if (!res.ok) throw new Error(`Failed to fetch player: ${res.statusText}`);
 
   const content = await res.text();
-  await fs.writeFile(filePath, content, 'utf8');
+  const { data, compressed } = await _compressContent(content);
 
-  metadata.players[hash] = { url, t: now, a: now };
+  const filePath = compressed ? `${baseFilePath}.zst` : baseFilePath;
+  await fs.writeFile(filePath, data);
+
+  metadata.players[hash] = { url, t: now, a: now, compressed };
   _scheduleSave();
 
-  return filePath;
+  return baseFilePath;
 };
 
 export const getPlayerContent = async (path: string): Promise<string> => {
   const cached = contentCache.get(path);
   if (cached) return cached;
 
-  const content = await fs.readFile(path, 'utf8');
+  await _loadMeta();
+  const hash = path.split('/').pop()?.replace('.js', '') || '';
+  const playerMeta = metadata.players[hash];
+
+  const filePath = playerMeta?.compressed ? `${path}.zst` : path;
+  const data = await fs.readFile(filePath);
+  const content = await _decompressContent(
+    new Uint8Array(data),
+    playerMeta?.compressed || false
+  );
+
   contentCache.set(path, content);
   return content;
 };
@@ -223,7 +267,7 @@ export const getPreprocessed = async (path: string): Promise<string | undefined>
   const now = Date.now();
   if (now - meta.t > CACHE_TTL) {
     const hash = path.split('/').pop()?.replace('.js', '') || '';
-    const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+    const file = join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`);
     try {
       await fs.unlink(file);
     } catch {}
@@ -233,12 +277,16 @@ export const getPreprocessed = async (path: string): Promise<string | undefined>
   }
 
   const hash = path.split('/').pop()?.replace('.js', '') || '';
-  const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+  const file = join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`);
   try {
-    const data = await fs.readFile(file, 'utf8');
+    const data = await fs.readFile(file);
+    const content = await _decompressContent(
+      new Uint8Array(data),
+      meta.compressed || false
+    );
     meta.a = now;
     _scheduleSave();
-    return data;
+    return content;
   } catch {
     delete metadata.processed[path];
     _scheduleSave();
@@ -246,7 +294,7 @@ export const getPreprocessed = async (path: string): Promise<string | undefined>
   }
 };
 
-export const setPreprocessed = async (path: string, data: string): Promise<void> => {
+export const setPreprocessed = async (path: string, content: string): Promise<void> => {
   await _loadMeta();
 
   const keys = Object.keys(metadata.processed);
@@ -261,7 +309,8 @@ export const setPreprocessed = async (path: string, data: string): Promise<void>
     }
     if (lruKey) {
       const hash = lruKey.split('/').pop()?.replace('.js', '') || '';
-      const file = join(PROCESSED_DIR, `${hash}_processed.js`);
+      const oldMeta = metadata.processed[lruKey];
+      const file = join(PROCESSED_DIR, `${hash}_processed.js${oldMeta?.compressed ? '.zst' : ''}`);
       try {
         await fs.unlink(file);
       } catch {}
@@ -270,11 +319,12 @@ export const setPreprocessed = async (path: string, data: string): Promise<void>
   }
 
   const hash = path.split('/').pop()?.replace('.js', '') || '';
-  const file = join(PROCESSED_DIR, `${hash}_processed.js`);
-  await fs.writeFile(file, data, 'utf8');
+  const { data, compressed } = await _compressContent(content);
+  const file = join(PROCESSED_DIR, `${hash}_processed.js${compressed ? '.zst' : ''}`);
+  await fs.writeFile(file, data);
 
   const now = Date.now();
-  metadata.processed[path] = { t: now, a: now };
+  metadata.processed[path] = { t: now, a: now, compressed };
   _scheduleSave();
 };
 

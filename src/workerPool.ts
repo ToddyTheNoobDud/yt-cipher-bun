@@ -1,74 +1,130 @@
-// workerPool.ts - Optimized worker management
+
 import type { Input, Output } from '../ejs/src/main.ts';
-import { preprocessPlayer } from '../ejs/src/solvers.ts';
 import { env } from 'bun';
 
 interface Task {
   data: Input;
   resolve: (output: Output) => void;
   reject: (error: any) => void;
+  timeout?: NodeJS.Timeout;
 }
 
-const CONCURRENCY = parseInt(env.MAX_THREADS || '', 30) || navigator.hardwareConcurrency || 1;
+const CONCURRENCY = parseInt(env.MAX_THREADS || '', 10) || navigator.hardwareConcurrency || 4;
 const TIMEOUT = 30000;
+const WORKER_PATH = new URL('./worker.ts', import.meta.url).href;
 
-const queue: Task[] = [];
-let activeTasks = 0;
+class WorkerPool {
+  private workers: Worker[] = [];
+  private availableWorkers: Worker[] = [];
+  private queue: Task[] = [];
+  private taskMap = new Map<Worker, Task>();
 
-const _processTask = async (task: Task): Promise<void> => {
-  activeTasks++;
+  constructor(private size: number) {
+    this.initWorkers();
+  }
 
-  try {
-    // For now, run preprocessing directly instead of using workers
-    // This avoids the worker termination issues
-    if (task.data.type === 'player') {
-      const preprocessed = preprocessPlayer(task.data.player);
-      task.resolve({
-        type: 'result',
-        preprocessed_player: preprocessed,
-        responses: []
-      });
-    } else if (task.data.type === 'preprocessed') {
-      // For preprocessed players, we need to handle them differently
-      // This is a simplified approach
-      task.resolve({
-        type: 'result',
-        preprocessed_player: task.data.preprocessed_player,
-        responses: []
-      });
-    } else {
-      throw new Error('Unsupported task type');
+  private initWorkers(): void {
+    for (let i = 0; i < this.size; i++) {
+      const worker = new Worker(WORKER_PATH);
+
+      worker.onmessage = (e: MessageEvent) => {
+        const task = this.taskMap.get(worker);
+        if (!task) return;
+
+        if (task.timeout) clearTimeout(task.timeout);
+        this.taskMap.delete(worker);
+        this.availableWorkers.push(worker);
+
+        const { type, data } = e.data;
+
+        if (type === 'success') {
+          task.resolve(data);
+        } else if (type === 'error') {
+          task.reject(new Error(data.message));
+        }
+
+        this.dispatch();
+      };
+
+      worker.onerror = (error) => {
+        const task = this.taskMap.get(worker);
+        if (task) {
+          if (task.timeout) clearTimeout(task.timeout);
+          this.taskMap.delete(worker);
+          task.reject(error);
+        }
+
+        const idx = this.workers.indexOf(worker);
+        if (idx !== -1) {
+          worker.terminate();
+          const newWorker = new Worker(WORKER_PATH);
+          this.workers[idx] = newWorker;
+          this.availableWorkers.push(newWorker);
+        }
+
+        this.dispatch();
+      };
+
+      this.workers.push(worker);
+      this.availableWorkers.push(worker);
     }
-  } catch (error) {
-    const err = error as Error;
-    task.reject(new Error(`Processing failed: ${err.message}`));
-  } finally {
-    activeTasks--;
-    _dispatch();
   }
-};
 
-const _dispatch = (): void => {
-  if (activeTasks >= CONCURRENCY || queue.length === 0) return;
+  private dispatch(): void {
+    while (this.availableWorkers.length > 0 && this.queue.length > 0) {
+      const worker = this.availableWorkers.shift()!;
+      const task = this.queue.shift()!;
 
-  const task = queue.shift()!;
-  if (task) {
-    // Use setTimeout to avoid blocking the main thread
-    setTimeout(() => _processTask(task), 0);
+      this.taskMap.set(worker, task);
+
+      task.timeout = setTimeout(() => {
+        this.taskMap.delete(worker);
+        this.availableWorkers.push(worker);
+        task.reject(new Error('Task timeout'));
+        this.dispatch();
+      }, TIMEOUT);
+
+      worker.postMessage(task.data);
+    }
   }
-};
 
-export const execInPool = (data: Input): Promise<Output> =>
-  new Promise((resolve, reject) => {
-    queue.push({ data, resolve, reject });
-    _dispatch();
-  });
+  exec(data: Input): Promise<Output> {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ data, resolve, reject });
+      this.dispatch();
+    });
+  }
+
+  shutdown(): void {
+    for (const worker of this.workers) {
+      worker.terminate();
+    }
+    this.workers = [];
+    this.availableWorkers = [];
+    this.queue = [];
+    this.taskMap.clear();
+  }
+}
+
+let pool: WorkerPool | null = null;
 
 export const initWorkers = (): void => {
-  console.log(`Initialized worker pool with concurrency: ${CONCURRENCY}`);
+  if (!pool) {
+    pool = new WorkerPool(CONCURRENCY);
+    console.log(`Initialized worker pool with ${CONCURRENCY} workers`);
+  }
+};
+
+export const execInPool = (data: Input): Promise<Output> => {
+  if (!pool) {
+    throw new Error('Worker pool not initialized');
+  }
+  return pool.exec(data);
 };
 
 export const shutdownWorkers = (): void => {
-  queue.length = 0;
-  activeTasks = 0;
+  if (pool) {
+    pool.shutdown();
+    pool = null;
+  }
 };
