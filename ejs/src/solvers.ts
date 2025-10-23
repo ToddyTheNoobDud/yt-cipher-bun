@@ -16,7 +16,7 @@ export function preprocessPlayer(data: string): string {
   }
 
   const found = {
-    nsig: null as ESTree.ArrowFunctionExpression | null,
+    n: null as ESTree.ArrowFunctionExpression | null,
     sig: null as ESTree.ArrowFunctionExpression | null
   };
 
@@ -24,10 +24,10 @@ export function preprocessPlayer(data: string): string {
   const plainExpressions: ESTree.Node[] = [];
 
   for (const node of block.body) {
-    if (!found.nsig) {
-      const nsig = extractNsig(node);
-      if (nsig) {
-        found.nsig = nsig;
+    if (!found.n) {
+      const n = extractNsig(node);
+      if (n) {
+        found.n = n;
       }
     }
 
@@ -121,10 +121,10 @@ function createResultAssignment(
 }
 
 export function getFromPrepared(code: string): {
-  nsig: ((val: string) => string) | null;
+  n: ((val: string) => string) | null;
   sig: ((val: string) => string) | null;
 } {
-  const resultObj = { nsig: null, sig: null };
+  const resultObj = { n: null, sig: null };
   Function("_result", code)(resultObj);
   return resultObj;
 }

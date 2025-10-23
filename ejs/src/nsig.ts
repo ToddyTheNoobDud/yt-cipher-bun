@@ -105,11 +105,11 @@ function extractFromFallback(node: ESTree.Node): ESTree.ArrowFunctionExpression 
 function makeSolverFunc(name: string): ESTree.ArrowFunctionExpression {
   return {
     type: "ArrowFunctionExpression",
-    params: [{ type: "Identifier", name: "nsig" }],
+    params: [{ type: "Identifier", name: "n" }],
     body: {
       type: "CallExpression",
       callee: { type: "Identifier", name },
-      arguments: [{ type: "Identifier", name: "nsig" }],
+      arguments: [{ type: "Identifier", name: "n" }],
       optional: false
     },
     async: false,

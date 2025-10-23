@@ -52,7 +52,7 @@ export default function main(input: Input): Output {
   }
 
   const responses = input.requests.map((request): Response => {
-    if (!isOneOf(request.type, "nsig", "sig")) {
+    if (!isOneOf(request.type, "n", "sig")) {
       return {
         type: "error",
         error: `Unknown request type: ${request.type}`
@@ -134,7 +134,7 @@ export type Input =
   };
 
 type Request = {
-  type: "nsig" | "sig";
+  type: "n" | "sig";
   challenges: string[];
 };
 
