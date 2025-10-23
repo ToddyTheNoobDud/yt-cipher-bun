@@ -17,7 +17,7 @@ const CACHE_TTL = 86400000; // 1 day
 const SIG_TTL = 3600000; // 1 hour
 const CLEANUP_INTERVAL = 3600000; // 1 hour
 const META_SAVE_DELAY = 5000;
-const COMPRESSION_THRESHOLD = 262144; // Compress files larger than 2.5MB, ig this is good already
+const COMPRESSION_THRESHOLD = 4194304 // Compress files larger than 4MB
 
 interface CacheEntry<T> {
   v: T;
@@ -339,3 +339,4 @@ export const initCaches = async (): Promise<void> => {
   await _loadMeta();
   await _cleanup();
 };
+
