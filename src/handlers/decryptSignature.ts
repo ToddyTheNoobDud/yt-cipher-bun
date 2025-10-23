@@ -1,10 +1,13 @@
+// decryptSignature.ts - Optimized with efficient caching
 import type { Input } from '../../ejs/src/main.ts';
 import { execInPool } from '../workerPool.ts';
 import {
   getPlayerFilePath,
   getPlayerContent,
   getPreprocessed,
-  setPreprocessed
+  setPreprocessed,
+  getSignature,
+  setSignature
 } from '../cacheManager.ts';
 import type { SignatureRequest, SignatureResponse } from '../types.ts';
 
@@ -13,6 +16,8 @@ const _error = (msg: string, status: number): Response =>
     status,
     headers: { 'Content-Type': 'application/json' }
   });
+
+const _key = (path: string, sig: string, n: string): string => `${path}:${sig}:${n}`;
 
 export const handleDecryptSignature = async (req: Request): Promise<Response> => {
   let body: any;
@@ -34,7 +39,21 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
     return _error(err instanceof Error ? err.message : 'Failed to resolve player file path', 500);
   }
 
-  // Only cache the preprocessed player script, not individual song requests
+  const key = _key(path, encrypted_signature || '', n_param || '');
+  const cached = getSignature(key);
+
+  if (cached) {
+    const [sig, n] = cached.split('|');
+    const res: SignatureResponse = {
+      decrypted_signature: sig || '',
+      decrypted_n_sig: n || ''
+    };
+    return new Response(JSON.stringify(res), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
   const preprocessed = await getPreprocessed(path);
 
   let player: string | undefined;
@@ -52,7 +71,7 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
         preprocessed_player: preprocessed,
         requests: [
           { type: 'sig', challenges: encrypted_signature ? [encrypted_signature] : [] },
-          { type: 'nsig', challenges: n_param ? [n_param] : [] }
+          { type: 'n', challenges: n_param ? [n_param] : [] }
         ]
       }
     : {
@@ -61,7 +80,7 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
         output_preprocessed: true,
         requests: [
           { type: 'sig', challenges: encrypted_signature ? [encrypted_signature] : [] },
-          { type: 'nsig', challenges: n_param ? [n_param] : [] }
+          { type: 'n', challenges: n_param ? [n_param] : [] }
         ]
       };
 
@@ -74,7 +93,7 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
   }
 
   let sig = '';
-  let nsig = '';
+  let n = '';
 
   for (const r of output.responses || []) {
     if (r.type === 'result') {
@@ -82,14 +101,17 @@ export const handleDecryptSignature = async (req: Request): Promise<Response> =>
         sig = r.data[encrypted_signature];
       }
       if (n_param && n_param in r.data) {
-        nsig = r.data[n_param];
+        n = r.data[n_param];
       }
     }
   }
 
+  const value = `${sig}|${n}`;
+  setSignature(key, value);
+
   const res: SignatureResponse = {
     decrypted_signature: sig,
-    decrypted_n_sig: nsig
+    decrypted_n_sig: n
   };
 
   return new Response(JSON.stringify(res), {

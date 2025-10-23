@@ -1,3 +1,4 @@
+// getSts.ts - Optimized with compiled regex
 import {
   getPlayerFilePath,
   getPlayerContent,
@@ -61,5 +62,4 @@ export const handleGetSts = async (req: Request): Promise<Response> => {
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   });
-
 };
