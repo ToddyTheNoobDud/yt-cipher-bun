@@ -11,7 +11,7 @@ interface Task {
 
 const CONCURRENCY = parseInt(env.MAX_THREADS || '', 10) || navigator.hardwareConcurrency || 4;
 const TIMEOUT = 30000;
-const WORKER_PATH = new URL('./worker.ts', import.meta.url).href;
+const WORKER_PATH = new URL('../worker.ts', import.meta.url).href;
 
 class WorkerPool {
   private workers: Worker[] = [];
@@ -127,4 +127,5 @@ export const shutdownWorkers = (): void => {
     pool.shutdown();
     pool = null;
   }
+
 };
