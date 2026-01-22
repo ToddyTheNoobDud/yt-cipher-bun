@@ -1,13 +1,12 @@
-// cacheManager.ts - Zstandard compression for Bun 1.3 lol
 import { join } from 'path';
 import fs from 'fs/promises';
 import { zstdCompress, zstdDecompress } from 'bun';
+import { extractPlayerId, validateUrl } from './utils.ts';
 
 const CACHE_DIR = join(process.cwd(), 'player_cache');
 const PROCESSED_DIR = join(CACHE_DIR, 'processed');
 const META_FILE = join(CACHE_DIR, 'meta.json');
 
-// Constants
 const MEMORY_CACHE_SIZE = 50;
 const DISK_CACHE_SIZE = 100;
 const SIGNATURE_CACHE_SIZE = 500;
@@ -17,7 +16,7 @@ const CACHE_TTL = 86400000; // 1 day
 const SIG_TTL = 3600000; // 1 hour
 const CLEANUP_INTERVAL = 3600000; // 1 hour
 const META_SAVE_DELAY = 5000;
-const COMPRESSION_THRESHOLD = 4194304 // Compress files larger than 4MB
+const COMPRESSION_THRESHOLD = 4194304; // 4 mb
 
 interface CacheEntry<T> {
   v: T;
@@ -30,7 +29,6 @@ interface Metadata {
   processed: Record<string, { t: number; a: number; compressed?: boolean }>;
 }
 
-// Fast LRU cache implementation
 class LRUCache<T> {
   private c = new Map<string, CacheEntry<T>>();
   private m: number;
@@ -63,7 +61,9 @@ class LRUCache<T> {
       this.c.delete(k);
     } else if (this.c.size >= this.m) {
       const firstKey = this.c.keys().next().value;
-      this.c.delete(firstKey);
+      if (firstKey !== undefined) {
+        this.c.delete(firstKey);
+      }
     }
     this.c.set(k, { v, t: now, a: now });
   }
@@ -79,7 +79,6 @@ class LRUCache<T> {
   }
 }
 
-// Global caches
 const hashCache = new LRUCache<string>(HASH_CACHE_SIZE, Infinity);
 const contentCache = new LRUCache<string>(MEMORY_CACHE_SIZE, CACHE_TTL);
 const sigCache = new LRUCache<string>(SIGNATURE_CACHE_SIZE, SIG_TTL);
@@ -88,154 +87,149 @@ const stsCache = new LRUCache<string>(100, CACHE_TTL);
 let metadata: Metadata = { players: {}, processed: {} };
 let metaLoaded = false;
 let metaDirty = false;
-let saveTimer: NodeJS.Timeout | undefined;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let cleanupTimer: ReturnType<typeof setInterval>;
 
-// Fast hash computation with caching
-const _hash = async (s: string): Promise<string> => {
-  const cached = hashCache.get(s);
-  if (cached) return cached;
+const _internal = {
+  async hash(s: string): Promise<string> {
+    const cached = hashCache.get(s);
+    if (cached) return cached;
 
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  const h = Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
-  hashCache.set(s, h);
-  return h;
-};
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    const h = Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
+    hashCache.set(s, h);
+    return h;
+  },
 
-// Compression helpers using Bun 1.3's native zstd
-const _shouldCompress = (content: string): boolean => {
-  return content.length > COMPRESSION_THRESHOLD;
-};
+  shouldCompress(content: string): boolean {
+    return content.length > COMPRESSION_THRESHOLD;
+  },
 
-const _compressContent = async (content: string): Promise<{ data: Uint8Array; compressed: boolean }> => {
-  if (!_shouldCompress(content)) {
-    return { data: new TextEncoder().encode(content), compressed: false };
-  }
-
-  const compressed = await zstdCompress(content);
-  return { data: compressed, compressed: true };
-};
-
-const _decompressContent = async (data: Uint8Array, compressed: boolean): Promise<string> => {
-  if (!compressed) {
-    return new TextDecoder().decode(data);
-  }
-
-  const decompressed = await zstdDecompress(data);
-  return new TextDecoder().decode(decompressed);
-};
-
-// Lazy metadata loading
-const _loadMeta = async (): Promise<void> => {
-  if (metaLoaded) return;
-
-  try {
-    const data = await fs.readFile(META_FILE, 'utf8');
-    metadata = JSON.parse(data);
-  } catch (err: any) {
-    if (err.code !== 'ENOENT') throw err;
-    metadata = { players: {}, processed: {} };
-  }
-  metaLoaded = true;
-};
-
-// Batched metadata saving
-const _saveMeta = async (): Promise<void> => {
-  if (!metaDirty) return;
-  await fs.writeFile(META_FILE, JSON.stringify(metadata), 'utf8');
-  metaDirty = false;
-};
-
-const _scheduleSave = (): void => {
-  if (saveTimer) return;
-  metaDirty = true;
-  saveTimer = setTimeout(async () => {
-    await _saveMeta();
-    saveTimer = undefined;
-  }, META_SAVE_DELAY);
-  if (saveTimer.unref) saveTimer.unref();
-};
-
-// Cleanup expired entries
-const _cleanup = async (): Promise<void> => {
-  await _loadMeta();
-  const now = Date.now();
-  const toDelete: string[] = [];
-
-  for (const [hash, meta] of Object.entries(metadata.players)) {
-    if (now - meta.t > PLAYER_TTL) {
-      toDelete.push(hash);
-      try {
-        await fs.unlink(join(CACHE_DIR, `${hash}.js${meta.compressed ? '.zst' : ''}`));
-      } catch {}
+  async compressContent(content: string): Promise<{ data: Uint8Array; compressed: boolean }> {
+    if (!this.shouldCompress(content)) {
+      return { data: new TextEncoder().encode(content), compressed: false };
     }
-  }
+    const compressed = await zstdCompress(content);
+    return { data: compressed, compressed: true };
+  },
 
-  for (const [key, meta] of Object.entries(metadata.processed)) {
-    if (now - meta.t > CACHE_TTL) {
-      const hash = key.split('/').pop()?.replace('.js', '') || '';
-      try {
-        await fs.unlink(join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`));
-      } catch {}
-      delete metadata.processed[key];
+  async decompressContent(data: Uint8Array, compressed: boolean): Promise<string> {
+    if (!compressed) {
+      return new TextDecoder().decode(data);
     }
-  }
+    const decompressed = await zstdDecompress(data);
+    return new TextDecoder().decode(decompressed);
+  },
 
-  for (const hash of toDelete) {
-    delete metadata.players[hash];
-  }
+  async loadMeta(): Promise<void> {
+    if (metaLoaded) return;
+    try {
+      const data = await fs.readFile(META_FILE, 'utf8');
+      metadata = JSON.parse(data);
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') throw err;
+      metadata = { players: {}, processed: {} };
+    }
+    metaLoaded = true;
+  },
 
-  if (toDelete.length > 0) {
+  async saveMeta(): Promise<void> {
+    if (!metaDirty) return;
+    await fs.writeFile(META_FILE, JSON.stringify(metadata), 'utf8');
+    metaDirty = false;
+  },
+
+  scheduleSave(): void {
+    if (saveTimer) return;
     metaDirty = true;
-    await _saveMeta();
+    saveTimer = setTimeout(async () => {
+      await this.saveMeta();
+      saveTimer = undefined;
+    }, META_SAVE_DELAY);
+  },
+
+  async unlinkFile(path: string): Promise<void> {
+    try {
+      await fs.unlink(path);
+    } catch {}
+  },
+
+  getFilePath(hash: string, compressed: boolean, baseDir: string = CACHE_DIR, suffix: string = '.js'): string {
+    const base = join(baseDir, `${hash}${suffix}`);
+    return compressed ? `${base}.zst` : base;
+  },
+
+  async cleanup(): Promise<void> {
+    await this.loadMeta();
+    const now = Date.now();
+    const toDelete: string[] = [];
+
+    for (const [hash, meta] of Object.entries(metadata.players)) {
+      if (now - meta.t > PLAYER_TTL) {
+        toDelete.push(hash);
+        await this.unlinkFile(this.getFilePath(hash, !!meta.compressed));
+      }
+    }
+
+    for (const [key, meta] of Object.entries(metadata.processed)) {
+      if (now - meta.t > CACHE_TTL) {
+        const hash = key.split('/').pop()?.replace('.js', '') || '';
+        await this.unlinkFile(this.getFilePath(hash, !!meta.compressed, PROCESSED_DIR, '_processed.js'));
+        delete metadata.processed[key];
+      }
+    }
+
+    for (const hash of toDelete) {
+      delete metadata.players[hash];
+    }
+
+    if (toDelete.length > 0) {
+      metaDirty = true;
+      await this.saveMeta();
+    }
   }
 };
 
-const cleanupTimer = setInterval(_cleanup, CLEANUP_INTERVAL);
-if (cleanupTimer.unref) cleanupTimer.unref();
+cleanupTimer = setInterval(() => _internal.cleanup(), CLEANUP_INTERVAL);
 
-// Public API
 export const getPlayerFilePath = async (url: string): Promise<string> => {
-  const hash = await _hash(url);
+  const normalizedUrl = validateUrl(url);
+  const playerId = extractPlayerId(normalizedUrl);
+  const hash = playerId !== 'unknown' ? playerId : await _internal.hash(normalizedUrl);
+
   const baseFilePath = join(CACHE_DIR, `${hash}.js`);
   const now = Date.now();
 
-  await _loadMeta();
+  await _internal.loadMeta();
 
   if (metadata.players[hash]) {
     metadata.players[hash].a = now;
     if (now - metadata.players[hash].t <= PLAYER_TTL) {
-      const filePath = metadata.players[hash].compressed
-        ? `${baseFilePath}.zst`
-        : baseFilePath;
+      const filePath = _internal.getFilePath(hash, !!metadata.players[hash].compressed);
       try {
         await fs.access(filePath);
-        _scheduleSave();
-        return baseFilePath; // Return base path, compression is handled internally
+        _internal.scheduleSave();
+        return baseFilePath;
       } catch {
         delete metadata.players[hash];
       }
     } else {
-      try {
-        const filePath = metadata.players[hash].compressed
-          ? `${baseFilePath}.zst`
-          : baseFilePath;
-        await fs.unlink(filePath);
-      } catch {}
+      await _internal.unlinkFile(_internal.getFilePath(hash, !!metadata.players[hash].compressed));
       delete metadata.players[hash];
     }
   }
 
-  const res = await fetch(url);
+  const res = await fetch(normalizedUrl);
   if (!res.ok) throw new Error(`Failed to fetch player: ${res.statusText}`);
 
   const content = await res.text();
-  const { data, compressed } = await _compressContent(content);
+  const { data, compressed } = await _internal.compressContent(content);
 
-  const filePath = compressed ? `${baseFilePath}.zst` : baseFilePath;
+  const filePath = _internal.getFilePath(hash, compressed);
   await fs.writeFile(filePath, data);
 
-  metadata.players[hash] = { url, t: now, a: now, compressed };
-  _scheduleSave();
+  metadata.players[hash] = { url: normalizedUrl, t: now, a: now, compressed };
+  _internal.scheduleSave();
 
   return baseFilePath;
 };
@@ -244,58 +238,49 @@ export const getPlayerContent = async (path: string): Promise<string> => {
   const cached = contentCache.get(path);
   if (cached) return cached;
 
-  await _loadMeta();
+  await _internal.loadMeta();
   const hash = path.split('/').pop()?.replace('.js', '') || '';
   const playerMeta = metadata.players[hash];
 
-  const filePath = playerMeta?.compressed ? `${path}.zst` : path;
+  const filePath = _internal.getFilePath(hash, !!playerMeta?.compressed);
   const data = await fs.readFile(filePath);
-  const content = await _decompressContent(
-    new Uint8Array(data),
-    playerMeta?.compressed || false
-  );
+  const content = await _internal.decompressContent(new Uint8Array(data), !!playerMeta?.compressed);
 
   contentCache.set(path, content);
   return content;
 };
 
 export const getPreprocessed = async (path: string): Promise<string | undefined> => {
-  await _loadMeta();
+  await _internal.loadMeta();
   const meta = metadata.processed[path];
   if (!meta) return undefined;
 
   const now = Date.now();
   if (now - meta.t > CACHE_TTL) {
     const hash = path.split('/').pop()?.replace('.js', '') || '';
-    const file = join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`);
-    try {
-      await fs.unlink(file);
-    } catch {}
+    await _internal.unlinkFile(_internal.getFilePath(hash, !!meta.compressed, PROCESSED_DIR, '_processed.js'));
     delete metadata.processed[path];
-    _scheduleSave();
+    _internal.scheduleSave();
     return undefined;
   }
 
   const hash = path.split('/').pop()?.replace('.js', '') || '';
-  const file = join(PROCESSED_DIR, `${hash}_processed.js${meta.compressed ? '.zst' : ''}`);
+  const file = _internal.getFilePath(hash, !!meta.compressed, PROCESSED_DIR, '_processed.js');
   try {
     const data = await fs.readFile(file);
-    const content = await _decompressContent(
-      new Uint8Array(data),
-      meta.compressed || false
-    );
+    const content = await _internal.decompressContent(new Uint8Array(data), !!meta.compressed);
     meta.a = now;
-    _scheduleSave();
+    _internal.scheduleSave();
     return content;
   } catch {
     delete metadata.processed[path];
-    _scheduleSave();
+    _internal.scheduleSave();
     return undefined;
   }
 };
 
 export const setPreprocessed = async (path: string, content: string): Promise<void> => {
-  await _loadMeta();
+  await _internal.loadMeta();
 
   const keys = Object.keys(metadata.processed);
   if (keys.length >= DISK_CACHE_SIZE && !(path in metadata.processed)) {
@@ -310,22 +295,19 @@ export const setPreprocessed = async (path: string, content: string): Promise<vo
     if (lruKey) {
       const hash = lruKey.split('/').pop()?.replace('.js', '') || '';
       const oldMeta = metadata.processed[lruKey];
-      const file = join(PROCESSED_DIR, `${hash}_processed.js${oldMeta?.compressed ? '.zst' : ''}`);
-      try {
-        await fs.unlink(file);
-      } catch {}
+      await _internal.unlinkFile(_internal.getFilePath(hash, !!oldMeta?.compressed, PROCESSED_DIR, '_processed.js'));
       delete metadata.processed[lruKey];
     }
   }
 
   const hash = path.split('/').pop()?.replace('.js', '') || '';
-  const { data, compressed } = await _compressContent(content);
-  const file = join(PROCESSED_DIR, `${hash}_processed.js${compressed ? '.zst' : ''}`);
+  const { data, compressed } = await _internal.compressContent(content);
+  const file = _internal.getFilePath(hash, compressed, PROCESSED_DIR, '_processed.js');
   await fs.writeFile(file, data);
 
   const now = Date.now();
   metadata.processed[path] = { t: now, a: now, compressed };
-  _scheduleSave();
+  _internal.scheduleSave();
 };
 
 export const getSignature = (key: string): string | undefined => sigCache.get(key);
@@ -336,7 +318,11 @@ export const setSts = (path: string, sts: string): void => stsCache.set(path, st
 export const initCaches = async (): Promise<void> => {
   await fs.mkdir(CACHE_DIR, { recursive: true });
   await fs.mkdir(PROCESSED_DIR, { recursive: true });
-  await _loadMeta();
-  await _cleanup();
+  await _internal.loadMeta();
+  await _internal.cleanup();
 };
 
+process.on('exit', () => {
+  if (cleanupTimer) clearInterval(cleanupTimer);
+  if (saveTimer) clearTimeout(saveTimer);
+});
