@@ -1,131 +1,161 @@
-
-import type { Input, Output } from '../ejs/src/main.ts';
-import { env } from 'bun';
+import type { Input, Output } from "../ejs/src/yt/solver/main.ts";
+import { env } from "bun";
 
 interface Task {
-  data: Input;
-  resolve: (output: Output) => void;
-  reject: (error: any) => void;
-  timeout?: NodeJS.Timeout;
+	data: Input;
+	resolve: (output: Output) => void;
+	reject: (error: unknown) => void;
+	timeout?: NodeJS.Timeout;
+	id: number;
 }
 
-const CONCURRENCY = parseInt(env.MAX_THREADS || '', 10) || navigator.hardwareConcurrency || 4;
+const CONCURRENCY = parseInt(env.MAX_THREADS || "", 10) || Math.min(navigator.hardwareConcurrency || 4, 8);
 const TIMEOUT = 30000;
-const WORKER_PATH = new URL('../worker.ts', import.meta.url).href;
+const MAX_QUEUE_SIZE = 1000;
+const WORKER_PATH = new URL("../worker.ts", import.meta.url).href;
+
+let taskIdCounter = 0;
 
 class WorkerPool {
-  private workers: Worker[] = [];
-  private availableWorkers: Worker[] = [];
-  private queue: Task[] = [];
-  private taskMap = new Map<Worker, Task>();
+	private workers: Worker[] = [];
+	private availableWorkers: Worker[] = [];
+	private queue: Task[] = [];
+	private taskMap = new Map<Worker, Task>();
 
-  constructor(private size: number) {
-    this.initWorkers();
-  }
+	constructor(private size: number) {
+		// Lazy initialization: Workers are spawned in dispatch() as needed
+	}
 
-  private initWorkers(): void {
-    for (let i = 0; i < this.size; i++) {
-      const worker = new Worker(WORKER_PATH);
+	private createWorker(): Worker {
+		const worker = new Worker(WORKER_PATH);
+		this.setupHandlers(worker);
+		return worker;
+	}
 
-      worker.onmessage = (e: MessageEvent) => {
-        const task = this.taskMap.get(worker);
-        if (!task) return;
+	private setupHandlers(worker: Worker): void {
+		worker.onmessage = (e: MessageEvent) => {
+			const task = this.taskMap.get(worker);
+			if (!task) return;
 
-        if (task.timeout) clearTimeout(task.timeout);
-        this.taskMap.delete(worker);
-        this.availableWorkers.push(worker);
+			if (task.timeout) clearTimeout(task.timeout);
+			this.taskMap.delete(worker);
+			this.availableWorkers.push(worker);
 
-        const { type, data } = e.data;
+			const { type, data } = e.data;
 
-        if (type === 'success') {
-          task.resolve(data);
-        } else if (type === 'error') {
-          task.reject(new Error(data.message));
-        }
+			if (type === "success") {
+				task.resolve(data);
+			} else if (type === "error") {
+				task.reject(new Error(data.message));
+			}
 
-        this.dispatch();
-      };
+			this.dispatch();
+		};
 
-      worker.onerror = (error) => {
-        const task = this.taskMap.get(worker);
-        if (task) {
-          if (task.timeout) clearTimeout(task.timeout);
-          this.taskMap.delete(worker);
-          task.reject(error);
-        }
+		worker.onerror = (error) => {
+			const task = this.taskMap.get(worker);
+			if (task) {
+				if (task.timeout) clearTimeout(task.timeout);
+				this.taskMap.delete(worker);
+				task.reject(error);
+			}
 
-        const idx = this.workers.indexOf(worker);
-        if (idx !== -1) {
-          worker.terminate();
-          const newWorker = new Worker(WORKER_PATH);
-          this.workers[idx] = newWorker;
-          this.availableWorkers.push(newWorker);
-        }
+			setTimeout(() => {
+				this.replaceWorker(worker);
+				this.dispatch();
+			}, 1000);
+		};
+	}
 
-        this.dispatch();
-      };
+	private replaceWorker(oldWorker: Worker): void {
+		const idx = this.workers.indexOf(oldWorker);
+		if (idx === -1) return;
 
-      this.workers.push(worker);
-      this.availableWorkers.push(worker);
-    }
-  }
+		oldWorker.terminate();
+		const newWorker = this.createWorker();
+		this.workers[idx] = newWorker;
+		this.availableWorkers.push(newWorker);
+	}
 
-  private dispatch(): void {
-    while (this.availableWorkers.length > 0 && this.queue.length > 0) {
-      const worker = this.availableWorkers.shift()!;
-      const task = this.queue.shift()!;
+	private dispatch(): void {
+		if (this.queue.length > 0 && this.availableWorkers.length === 0 && this.workers.length < this.size) {
+			const worker = this.createWorker();
+			this.workers.push(worker);
+			this.availableWorkers.push(worker);
+		}
 
-      this.taskMap.set(worker, task);
+		while (this.availableWorkers.length > 0 && this.queue.length > 0) {
+			const worker = this.availableWorkers.shift()!;
+			const task = this.queue.shift()!;
 
-      task.timeout = setTimeout(() => {
-        this.taskMap.delete(worker);
-        this.availableWorkers.push(worker);
-        task.reject(new Error('Task timeout'));
-        this.dispatch();
-      }, TIMEOUT);
+			this.taskMap.set(worker, task);
 
-      worker.postMessage(task.data);
-    }
-  }
+			task.timeout = setTimeout(() => {
+				const currentTask = this.taskMap.get(worker);
+				if (currentTask?.id !== task.id) return;
 
-  exec(data: Input): Promise<Output> {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ data, resolve, reject });
-      this.dispatch();
-    });
-  }
+				this.taskMap.delete(worker);
+				task.reject(new Error("Task timeout"));
 
-  shutdown(): void {
-    for (const worker of this.workers) {
-      worker.terminate();
-    }
-    this.workers = [];
-    this.availableWorkers = [];
-    this.queue = [];
-    this.taskMap.clear();
-  }
+				this.replaceWorker(worker);
+				this.dispatch();
+			}, TIMEOUT);
+
+			worker.postMessage(task.data);
+		}
+	}
+
+	exec(data: Input): Promise<Output> {
+		if (this.queue.length >= MAX_QUEUE_SIZE) {
+			return Promise.reject(new Error("Worker pool queue is full, try again later"));
+		}
+
+		return new Promise((resolve, reject) => {
+			const id = ++taskIdCounter;
+			this.queue.push({ data, resolve, reject, id });
+			this.dispatch();
+		});
+	}
+
+	shutdown(): void {
+		for (const worker of this.workers) {
+			worker.terminate();
+		}
+		// Reject all pending tasks
+		for (const task of this.queue) {
+			if (task.timeout) clearTimeout(task.timeout);
+			task.reject(new Error("Worker pool shutting down"));
+		}
+		for (const [, task] of this.taskMap) {
+			if (task.timeout) clearTimeout(task.timeout);
+			task.reject(new Error("Worker pool shutting down"));
+		}
+		this.workers = [];
+		this.availableWorkers = [];
+		this.queue = [];
+		this.taskMap.clear();
+	}
 }
 
 let pool: WorkerPool | null = null;
 
 export const initWorkers = (): void => {
-  if (!pool) {
-    pool = new WorkerPool(CONCURRENCY);
-    console.log(`Initialized worker pool with ${CONCURRENCY} workers`);
-  }
+	if (!pool) {
+		pool = new WorkerPool(CONCURRENCY);
+		console.log(`Initialized lazy worker pool (max ${CONCURRENCY} workers)`);
+	}
 };
 
 export const execInPool = (data: Input): Promise<Output> => {
-  if (!pool) {
-    throw new Error('Worker pool not initialized');
-  }
-  return pool.exec(data);
+	if (!pool) {
+		throw new Error("Worker pool not initialized");
+	}
+	return pool.exec(data);
 };
 
 export const shutdownWorkers = (): void => {
-  if (pool) {
-    pool.shutdown();
-    pool = null;
-  }
-
+	if (pool) {
+		pool.shutdown();
+		pool = null;
+	}
 };

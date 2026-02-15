@@ -1,2 +1,5 @@
-ejs/
+node_modules/
+player_cache/
 .vscode/
+.env
+bun.lock

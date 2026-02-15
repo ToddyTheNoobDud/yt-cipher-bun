@@ -1,229 +1,130 @@
-// resolveUrl.ts - Optimized URL resolution with signature and n-parameter decryption
-import main from '../../ejs/src/main.ts';
-import {
-  getPlayerFilePath,
-  getPlayerContent,
-  getPreprocessed,
-  setPreprocessed
-} from '../cacheManager.ts';
-import type { ResolveUrlRequest, ResolveUrlResponse } from '../types.ts';
+import { execInPool } from "../workerPool.ts";
+import { getPlayerFilePath, getPlayerContent, getPreprocessed, setPreprocessed } from "../cacheManager.ts";
+import type { ResolveUrlRequest, ResolveUrlResponse } from "../types.ts";
+import { errorResponse, jsonResponse } from "../shared.ts";
+import { validateUrl } from "../utils.ts";
 
-const _error = (msg: string, status: number): Response =>
-  new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'Content-Type': 'application/json' }
-  });
+const _decrypt = async (
+	playerUrl: string,
+	requests: Array<{ type: "sig" | "n"; challenges: string[] }>,
+): Promise<{
+	responses: Array<{ type: string; data: Record<string, string> }>;
+	preprocessedPlayer?: string;
+} | null> => {
+	let path: string;
+	try {
+		path = await getPlayerFilePath(playerUrl);
+	} catch (e) {
+		console.error("getPlayerFilePath failed:", e);
+		return null;
+	}
 
-const _decryptSignature = async (player_url: string, encrypted_signature: string): Promise<string | null> => {
-  let path: string;
-  try {
-    path = await getPlayerFilePath(player_url);
-  } catch {
-    return null;
-  }
+	const preprocessed = await getPreprocessed(path);
+	let player: string | undefined;
 
-  const preprocessed = await getPreprocessed(path);
-  let player: string | undefined;
+	if (!preprocessed) {
+		try {
+			player = await getPlayerContent(path);
+		} catch (e) {
+			console.error("getPlayerContent failed:", e);
+			return null;
+		}
+	}
 
-  if (!preprocessed) {
-    try {
-      player = await getPlayerContent(path);
-    } catch {
-      return null;
-    }
-  }
+	try {
+		const input = preprocessed
+			? {
+					type: "preprocessed" as const,
+					preprocessed_player: preprocessed,
+					requests,
+				}
+			: {
+					type: "player" as const,
+					player: player!,
+					output_preprocessed: true,
+					requests,
+				};
 
-  try {
-    const input = preprocessed
-      ? {
-          type: 'preprocessed' as const,
-          preprocessed_player: preprocessed,
-          requests: [
-            { type: 'sig' as const, challenges: [encrypted_signature] }
-          ]
-        }
-      : {
-          type: 'player' as const,
-          player: player!,
-          output_preprocessed: true,
-          requests: [
-            { type: 'sig' as const, challenges: [encrypted_signature] }
-          ]
-        };
+		const output = await execInPool(input);
 
-    const output = main(input);
+		if (output.type === "error") return null;
 
-    if (output.type === 'error') return null;
+		if (output.preprocessed_player && !preprocessed) {
+			await setPreprocessed(path, output.preprocessed_player);
+		}
 
-    if (output.preprocessed_player && !preprocessed) {
-      await setPreprocessed(path, output.preprocessed_player);
-    }
-
-    // Extract the decrypted signature from the response
-    for (const response of output.responses) {
-      if (response.type === 'result' && encrypted_signature in response.data) {
-        return response.data[encrypted_signature];
-      }
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Error decrypting signature:', error);
-    return null;
-  }
-};
-
-const _decryptNParam = async (player_url: string, n_param: string): Promise<string | null> => {
-  let path: string;
-  try {
-    path = await getPlayerFilePath(player_url);
-  } catch {
-    return null;
-  }
-
-  const preprocessed = await getPreprocessed(path);
-  let player: string | undefined;
-
-  if (!preprocessed) {
-    try {
-      player = await getPlayerContent(path);
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const input = preprocessed
-      ? {
-          type: 'preprocessed' as const,
-          preprocessed_player: preprocessed,
-          requests: [
-            { type: 'n' as const, challenges: [n_param] }
-          ]
-        }
-      : {
-          type: 'player' as const,
-          player: player!,
-          output_preprocessed: true,
-          requests: [
-            { type: 'n' as const, challenges: [n_param] }
-          ]
-        };
-
-    const output = main(input);
-
-    if (output.type === 'error') return null;
-
-    if (output.preprocessed_player && !preprocessed) {
-      await setPreprocessed(path, output.preprocessed_player);
-    }
-
-    // Extract the decrypted n parameter from the response
-    for (const response of output.responses) {
-      if (response.type === 'result' && n_param in response.data) {
-        return response.data[n_param];
-      }
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Error decrypting n parameter:', error);
-    return null;
-  }
+		return {
+			responses: (output.responses || []) as any[],
+			preprocessedPlayer: output.preprocessed_player,
+		};
+	} catch (error) {
+		console.error("Error in decrypt:", error);
+		return null;
+	}
 };
 
 export const handleResolveUrl = async (req: Request): Promise<Response> => {
-  let body: any;
-  let rawText: string = '';
+	let body: ResolveUrlRequest;
+	try {
+		const rawText = await req.text();
+		body = rawText ? JSON.parse(rawText) : {};
+	} catch {
+		return errorResponse("Invalid JSON body", 400);
+	}
 
-  try {
-    rawText = await req.text();
-    body = rawText ? JSON.parse(rawText) : {};
-  } catch (parseError) {
-    console.error('Failed to parse request body:', rawText, parseError);
-    return _error('Invalid JSON body', 400);
-  }
+	const { stream_url, player_url, encrypted_signature, signature_key, n_param: nParamFromRequest } = body;
 
+	if (!stream_url) return errorResponse("stream_url is required", 400);
+	if (!player_url) return errorResponse("player_url is required", 400);
 
-  const { stream_url, player_url, encrypted_signature, signature_key, n_param: nParamFromRequest } = body as ResolveUrlRequest;
+	let normalizedPlayerUrl: string;
+	try {
+		normalizedPlayerUrl = validateUrl(player_url);
+	} catch (e) {
+		return errorResponse(e instanceof Error ? e.message : "Invalid player_url format", 400);
+	}
 
-  if (!stream_url) {
-    console.error('Missing stream_url in request body:', body);
-    return _error('stream_url is required', 400);
-  }
-  if (!player_url) {
-    console.error('Missing player_url in request body:', body);
-    return _error('player_url is required', 400);
-  }
+	let url: URL;
+	try {
+		url = new URL(stream_url);
+	} catch {
+		return errorResponse("Invalid stream_url format", 400);
+	}
 
-  // Validate and normalize URLs
-  let normalizedPlayerUrl = player_url;
-  try {
-    // Handle relative player URLs by converting them to absolute URLs
-    if (player_url.startsWith('/s/player/')) {
-      normalizedPlayerUrl = `https://www.youtube.com${player_url}`;
-    } else {
-      // Validate absolute URLs
-      new URL(player_url);
-    }
-  } catch (urlError) {
-    console.warn('Player URL validation warning:', urlError);
-    // For player URLs, try to handle as relative path
-    if (player_url.startsWith('/s/player/')) {
-      normalizedPlayerUrl = `https://www.youtube.com${player_url}`;
-    } else {
-      console.error('Invalid player_url format:', player_url);
-      return _error('Invalid player_url format', 400);
-    }
-  }
+	const nParam = nParamFromRequest || url.searchParams.get("n") || null;
+	const requests: Array<{ type: "sig" | "n"; challenges: string[] }> = [];
 
-  // Validate stream URL
-  try {
-    new URL(stream_url);
-  } catch (urlError) {
-    console.error('Invalid stream_url format:', stream_url, urlError);
-    return _error('Invalid stream_url format', 400);
-  }
+	if (encrypted_signature) {
+		requests.push({ type: "sig", challenges: [encrypted_signature] });
+	}
+	if (nParam) {
+		requests.push({ type: "n", challenges: [nParam] });
+	}
 
-  let url: URL;
-  try {
-    url = new URL(stream_url);
-  } catch (urlError) {
-    console.error('Failed to parse stream_url:', stream_url, urlError);
-    return _error('Invalid stream_url format', 400);
-  }
+	if (requests.length === 0) {
+		const response: ResolveUrlResponse = { resolved_url: url.toString() };
+		return jsonResponse(response);
+	}
+	const result = await _decrypt(normalizedPlayerUrl, requests);
 
-  // Decrypt signature if provided (make it optional for compatibility)
-  if (encrypted_signature) {
-    const decryptedSig = await _decryptSignature(normalizedPlayerUrl, encrypted_signature);
-    if (!decryptedSig) {
-      return _error('Failed to decrypt signature', 500);
-    }
-    const sigKey = signature_key || 'sig';
-    url.searchParams.set(sigKey, decryptedSig);
-    url.searchParams.delete('s');
-  }
+	if (!result) {
+		return errorResponse("Failed to decrypt signature/n parameter", 500);
+	}
 
-  // Decrypt n parameter if provided or found in URL
-  let nParam = nParamFromRequest || null;
-  if (!nParam) {
-    nParam = url.searchParams.get('n');
-  }
+	for (const response of result.responses) {
+		if (response.type !== "result") continue;
 
-  if (nParam) {
-    const decryptedN = await _decryptNParam(normalizedPlayerUrl, nParam);
-    if (!decryptedN) {
-      return _error('Failed to decrypt n parameter', 500);
-    }
-    url.searchParams.set('n', decryptedN);
-  }
+		if (encrypted_signature && encrypted_signature in response.data) {
+			const sigKey = signature_key || "sig";
+			url.searchParams.set(sigKey, response.data[encrypted_signature]);
+			url.searchParams.delete("s");
+		}
 
-  const response: ResolveUrlResponse = {
-    resolved_url: url.toString(),
-  };
+		if (nParam && nParam in response.data) {
+			url.searchParams.set("n", response.data[nParam]);
+		}
+	}
 
-  return new Response(JSON.stringify(response), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' }
-  });
+	const responseData: ResolveUrlResponse = { resolved_url: url.toString() };
+	return jsonResponse(responseData);
 };
