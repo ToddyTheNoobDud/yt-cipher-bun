@@ -10,7 +10,7 @@ interface Task {
 }
 
 const CONCURRENCY = parseInt(env.MAX_THREADS || "", 10) || Math.min(navigator.hardwareConcurrency || 4, 8);
-const TIMEOUT = 30000;
+const TIMEOUT = parseInt(env.WORKER_TIMEOUT || "", 10) || 60000;
 const MAX_QUEUE_SIZE = 1000;
 const WORKER_PATH = new URL("../worker.ts", import.meta.url).href;
 
@@ -95,9 +95,15 @@ class WorkerPool {
 				if (currentTask?.id !== task.id) return;
 
 				this.taskMap.delete(worker);
-				task.reject(new Error("Task timeout"));
+				task.reject(new Error(`Task timeout after ${TIMEOUT}ms`));
 
-				this.replaceWorker(worker);
+				// Terminate and replace the worker since it might be stuck
+				worker.terminate();
+				const idx = this.workers.indexOf(worker);
+				if (idx !== -1) {
+					this.workers.splice(idx, 1);
+				}
+				// Create new worker on demand in dispatch()
 				this.dispatch();
 			}, TIMEOUT);
 
@@ -142,7 +148,7 @@ let pool: WorkerPool | null = null;
 export const initWorkers = (): void => {
 	if (!pool) {
 		pool = new WorkerPool(CONCURRENCY);
-		console.log(`Initialized lazy worker pool (max ${CONCURRENCY} workers)`);
+		console.log(`Initialized lazy worker pool (max ${CONCURRENCY} workers, timeout ${TIMEOUT}ms)`);
 	}
 };
 
