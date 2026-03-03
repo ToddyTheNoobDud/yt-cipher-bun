@@ -1,16 +1,32 @@
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com"]);
 const PATH_PREFIX = "/s/player/";
+const FORCED_PLAYER_ID = "9f4cc5e4";
+
+// temp hack for now, forcing player id to 9f4cc5e4
+const forcePlayerPath = (pathname: string): string => {
+	if (!pathname.startsWith(PATH_PREFIX)) throw new Error(`Invalid player path: ${pathname}`);
+
+	const parts = pathname.split("/");
+	if (parts.length < 5 || parts[1] !== "s" || parts[2] !== "player") {
+		throw new Error(`Invalid player path: ${pathname}`);
+	}
+
+	parts[3] = FORCED_PLAYER_ID;
+	return parts.join("/");
+};
 
 export const validateUrl = (url: string): string => {
 	if (url.startsWith("/")) {
-		if (!url.startsWith(PATH_PREFIX)) throw new Error(`Invalid player path: ${url}`);
-		return `https://www.youtube.com${url}`;
+		const normalized = new URL(`https://www.youtube.com${url}`);
+		normalized.pathname = forcePlayerPath(normalized.pathname);
+		return normalized.toString();
 	}
 
 	try {
 		const parsed = new URL(url);
 		if (!HOSTS.has(parsed.hostname)) throw new Error(`Player URL from invalid host: ${parsed.hostname}`);
-		return url;
+		parsed.pathname = forcePlayerPath(parsed.pathname);
+		return parsed.toString();
 	} catch {
 		throw new Error(`Invalid player URL: ${url}`);
 	}
@@ -24,8 +40,8 @@ export function extractPlayerId(playerUrl: string): string {
 		if (playerIndex !== -1 && playerIndex + 1 < pathParts.length) {
 			return pathParts[playerIndex + 1];
 		}
-	} catch (e) {
-		const match = playerUrl.match(/\/s\/player\/([^\/]+)/);
+	} catch {
+		const match = playerUrl.match(/\/s\/player\/([^/]+)/);
 		if (match) {
 			return match[1];
 		}
