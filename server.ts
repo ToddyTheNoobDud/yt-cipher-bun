@@ -25,9 +25,8 @@ const NOT_FOUND = errorResponse("Not Found", 404);
 
 const handler = async (req: Request): Promise<Response> => {
 	const pathname = new URL(req.url).pathname;
-	const isPublicRoute = pathname === "/" || pathname === "/health";
 
-	if (!isPublicRoute && HAS_TOKEN && req.headers.get("authorization") !== API_TOKEN) {
+	if (HAS_TOKEN && req.headers.get("authorization") !== API_TOKEN) {
 		return UNAUTHORIZED;
 	}
 
