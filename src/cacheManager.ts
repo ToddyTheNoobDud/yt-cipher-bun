@@ -1,6 +1,5 @@
 import { join, basename } from "path";
 import fs from "fs/promises";
-import { zstdCompress, zstdDecompress } from "bun";
 import { extractPlayerId, validateUrl } from "./utils.ts";
 
 const CACHE_DIR = join(process.cwd(), "player_cache");
@@ -16,7 +15,6 @@ const CACHE_TTL = 86400000; // 1 day
 const SIG_TTL = 3600000; // 1 hour
 const CLEANUP_INTERVAL = 3600000; // 1 hour
 const META_SAVE_DELAY = 5000;
-const COMPRESSION_THRESHOLD = 4194304; // 4 mb
 
 interface CacheEntry<T> {
 	v: T;
@@ -25,8 +23,8 @@ interface CacheEntry<T> {
 }
 
 interface Metadata {
-	players: Record<string, { url: string; t: number; a: number; compressed?: boolean }>;
-	processed: Record<string, { t: number; a: number; compressed?: boolean }>;
+	players: Record<string, { url: string; t: number; a: number }>;
+	processed: Record<string, { t: number; a: number }>;
 }
 
 class LRUCache<T> {
@@ -100,31 +98,14 @@ const _internal = {
 		return h;
 	},
 
-	shouldCompress(content: string): boolean {
-		return content.length > COMPRESSION_THRESHOLD;
-	},
-
-	async compressContent(content: string): Promise<{ data: Uint8Array; compressed: boolean }> {
-		if (!this.shouldCompress(content)) {
-			return { data: new TextEncoder().encode(content), compressed: false };
-		}
-		const compressed = await zstdCompress(content);
-		return { data: compressed, compressed: true };
-	},
-
-	async decompressContent(data: Uint8Array, compressed: boolean): Promise<string> {
-		if (!compressed) {
-			return new TextDecoder().decode(data);
-		}
-		const decompressed = await zstdDecompress(data);
-		return new TextDecoder().decode(decompressed);
+	getFilePath(hash: string, baseDir: string = CACHE_DIR, suffix: string = ".js"): string {
+		return join(baseDir, `${hash}${suffix}`);
 	},
 
 	async loadMeta(): Promise<void> {
 		if (metaLoaded) return;
 		try {
-			const data = await fs.readFile(META_FILE, "utf8");
-			metadata = JSON.parse(data);
+			metadata = await Bun.file(META_FILE).json();
 		} catch (err: any) {
 			if (err.code !== "ENOENT") throw err;
 			metadata = { players: {}, processed: {} };
@@ -134,7 +115,7 @@ const _internal = {
 
 	async saveMeta(): Promise<void> {
 		if (!metaDirty) return;
-		await fs.writeFile(META_FILE, JSON.stringify(metadata), "utf8");
+		await Bun.write(META_FILE, JSON.stringify(metadata));
 		metaDirty = false;
 	},
 
@@ -153,11 +134,6 @@ const _internal = {
 		} catch {}
 	},
 
-	getFilePath(hash: string, compressed: boolean, baseDir: string = CACHE_DIR, suffix: string = ".js"): string {
-		const base = join(baseDir, `${hash}${suffix}`);
-		return compressed ? `${base}.zst` : base;
-	},
-
 	async cleanup(): Promise<void> {
 		await this.loadMeta();
 		const now = Date.now();
@@ -166,14 +142,14 @@ const _internal = {
 		for (const [hash, meta] of Object.entries(metadata.players)) {
 			if (now - meta.t > PLAYER_TTL) {
 				toDelete.push(hash);
-				await this.unlinkFile(this.getFilePath(hash, !!meta.compressed));
+				await this.unlinkFile(this.getFilePath(hash));
 			}
 		}
 
 		for (const [key, meta] of Object.entries(metadata.processed)) {
 			if (now - meta.t > CACHE_TTL) {
 				const hash = basename(key, ".js");
-				await this.unlinkFile(this.getFilePath(hash, !!meta.compressed, PROCESSED_DIR, "_processed.js"));
+				await this.unlinkFile(this.getFilePath(hash, PROCESSED_DIR, "_processed.js"));
 				delete metadata.processed[key];
 			}
 		}
@@ -196,7 +172,7 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
 	const playerId = extractPlayerId(normalizedUrl);
 	const hash = playerId !== "unknown" ? playerId : _internal.hash(normalizedUrl);
 
-	const baseFilePath = join(CACHE_DIR, `${hash}.js`);
+	const filePath = _internal.getFilePath(hash);
 	const now = Date.now();
 
 	await _internal.loadMeta();
@@ -204,16 +180,15 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
 	if (metadata.players[hash]) {
 		metadata.players[hash].a = now;
 		if (now - metadata.players[hash].t <= PLAYER_TTL) {
-			const filePath = _internal.getFilePath(hash, !!metadata.players[hash].compressed);
 			try {
 				await fs.access(filePath);
 				_internal.scheduleSave();
-				return baseFilePath;
+				return filePath;
 			} catch {
 				delete metadata.players[hash];
 			}
 		} else {
-			await _internal.unlinkFile(_internal.getFilePath(hash, !!metadata.players[hash].compressed));
+			await _internal.unlinkFile(filePath);
 			delete metadata.players[hash];
 		}
 	}
@@ -222,28 +197,21 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
 	if (!res.ok) throw new Error(`Failed to fetch player: ${res.statusText}`);
 
 	const content = await res.text();
-	const { data, compressed } = await _internal.compressContent(content);
 
-	const filePath = _internal.getFilePath(hash, compressed);
-	await fs.writeFile(filePath, data);
+	await Bun.write(filePath, content);
 
-	metadata.players[hash] = { url: normalizedUrl, t: now, a: now, compressed };
+	metadata.players[hash] = { url: normalizedUrl, t: now, a: now };
 	_internal.scheduleSave();
 
-	return baseFilePath;
+	return filePath;
 };
 
 export const getPlayerContent = async (path: string): Promise<string> => {
 	const cached = contentCache.get(path);
 	if (cached) return cached;
 
-	await _internal.loadMeta();
-	const hash = basename(path, ".js");
-	const playerMeta = metadata.players[hash];
-
-	const filePath = _internal.getFilePath(hash, !!playerMeta?.compressed);
-	const data = await fs.readFile(filePath);
-	const content = await _internal.decompressContent(new Uint8Array(data), !!playerMeta?.compressed);
+	const mapped = Bun.mmap(path);
+	const content = new TextDecoder().decode(mapped);
 
 	contentCache.set(path, content);
 	return content;
@@ -255,15 +223,12 @@ export const getPreprocessed = async (path: string): Promise<string | undefined>
 	if (!meta) return undefined;
 
 	const now = Date.now();
-	if (now - meta.t > CACHE_TTL) {
-		return undefined;
-	}
+	if (now - meta.t > CACHE_TTL) return undefined;
 
 	const hash = basename(path, ".js");
-	const file = _internal.getFilePath(hash, !!meta.compressed, PROCESSED_DIR, "_processed.js");
+	const file = _internal.getFilePath(hash, PROCESSED_DIR, "_processed.js");
 	try {
-		const data = await fs.readFile(file);
-		const content = await _internal.decompressContent(new Uint8Array(data), !!meta.compressed);
+		const content = await Bun.file(file).text();
 		meta.a = now;
 		_internal.scheduleSave();
 		return content;
@@ -289,19 +254,18 @@ export const setPreprocessed = async (path: string, content: string): Promise<vo
 		}
 		if (lruKey) {
 			const hash = basename(lruKey, ".js");
-			const oldMeta = metadata.processed[lruKey];
-			await _internal.unlinkFile(_internal.getFilePath(hash, !!oldMeta?.compressed, PROCESSED_DIR, "_processed.js"));
+			await _internal.unlinkFile(_internal.getFilePath(hash, PROCESSED_DIR, "_processed.js"));
 			delete metadata.processed[lruKey];
 		}
 	}
 
 	const hash = basename(path, ".js");
-	const { data, compressed } = await _internal.compressContent(content);
-	const file = _internal.getFilePath(hash, compressed, PROCESSED_DIR, "_processed.js");
-	await fs.writeFile(file, data);
+	const file = _internal.getFilePath(hash, PROCESSED_DIR, "_processed.js");
+
+	await Bun.write(file, content);
 
 	const now = Date.now();
-	metadata.processed[path] = { t: now, a: now, compressed };
+	metadata.processed[path] = { t: now, a: now };
 	_internal.scheduleSave();
 };
 

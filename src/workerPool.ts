@@ -1,5 +1,6 @@
 import type { Input, Output } from "../ejs/src/yt/solver/main.ts";
 import { env } from "bun";
+import { cpus } from "os";
 
 interface Task {
 	data: Input;
@@ -9,7 +10,7 @@ interface Task {
 	id: number;
 }
 
-const CONCURRENCY = parseInt(env.MAX_THREADS || "", 10) || Math.min(navigator.hardwareConcurrency || 4, 8);
+const CONCURRENCY = parseInt(env.MAX_THREADS || "", 10) || Math.min(cpus().length, 8);
 const TIMEOUT = parseInt(env.WORKER_TIMEOUT || "", 10) || 60000;
 const MAX_QUEUE_SIZE = 1000;
 const WORKER_PATH = new URL("../worker.ts", import.meta.url).href;
