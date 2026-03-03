@@ -4,6 +4,7 @@ import { initCaches } from "./src/cacheManager.ts";
 import { handleDecryptSignature } from "./src/handlers/decryptSignature.ts";
 import { handleGetSts } from "./src/handlers/getSts.ts";
 import { handleResolveUrl } from "./src/handlers/resolveUrl.ts";
+import { handleDocs, handleHealth } from "./src/handlers/docs.ts";
 import { withValidation } from "./src/middleware.ts";
 import { errorResponse } from "./src/shared.ts";
 
@@ -12,6 +13,8 @@ const PORT = parseInt(env.PORT || "8001", 10);
 const HAS_TOKEN = !!API_TOKEN;
 
 const ROUTES = new Map([
+	["/", handleDocs],
+	["/health", handleHealth],
 	["/decrypt_signature", handleDecryptSignature],
 	["/get_sts", handleGetSts],
 	["/resolve_url", handleResolveUrl],
@@ -21,11 +24,14 @@ const UNAUTHORIZED = errorResponse(HAS_TOKEN ? "Invalid API token" : "Missing AP
 const NOT_FOUND = errorResponse("Not Found", 404);
 
 const handler = async (req: Request): Promise<Response> => {
-	if (HAS_TOKEN && req.headers.get("authorization") !== API_TOKEN) {
+	const pathname = new URL(req.url).pathname;
+	const isPublicRoute = pathname === "/" || pathname === "/health";
+
+	if (!isPublicRoute && HAS_TOKEN && req.headers.get("authorization") !== API_TOKEN) {
 		return UNAUTHORIZED;
 	}
 
-	const fn = ROUTES.get(new URL(req.url).pathname);
+	const fn = ROUTES.get(pathname);
 	if (!fn) return NOT_FOUND;
 
 	try {
