@@ -11,7 +11,7 @@ RUN bun install --frozen-lockfile || bun install
 
 COPY . .
 
-ARG EJS_REF=5bc9811c7a2f64a88279d2b90884df2160e51b34
+ARG EJS_REF=2aa16f2ecb1629921eb17a5c4872827bc09a9edb
 RUN if [ ! -f ejs/src/yt/solver/main.ts ]; then \
 		echo "ejs submodule missing, fetching ${EJS_REF}"; \
 		rm -rf ejs; \
