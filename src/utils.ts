@@ -1,8 +1,7 @@
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com"]);
 const PATH_PREFIX = "/s/player/";
-const FORCED_PLAYER_ID = "140dafda";
+const IAS_PLAYER_PATH = ["player_ias.vflset", "en_US", "base.js"];
 
-// temp hack for now, forcing player id to 9f4cc5e4
 const forcePlayerPath = (pathname: string): string => {
 	if (!pathname.startsWith(PATH_PREFIX)) throw new Error(`Invalid player path: ${pathname}`);
 
@@ -11,8 +10,7 @@ const forcePlayerPath = (pathname: string): string => {
 		throw new Error(`Invalid player path: ${pathname}`);
 	}
 
-	parts[3] = FORCED_PLAYER_ID;
-	return parts.join("/");
+	return `/${["s", "player", parts[3], ...IAS_PLAYER_PATH].join("/")}`;
 };
 
 export const validateUrl = (url: string): string => {

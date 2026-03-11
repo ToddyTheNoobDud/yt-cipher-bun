@@ -179,6 +179,13 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
 
 	if (metadata.players[hash]) {
 		metadata.players[hash].a = now;
+		if (metadata.players[hash].url !== normalizedUrl) {
+			await _internal.unlinkFile(filePath);
+			delete metadata.players[hash];
+		}
+	}
+
+	if (metadata.players[hash]) {
 		if (now - metadata.players[hash].t <= PLAYER_TTL) {
 			try {
 				await fs.access(filePath);
