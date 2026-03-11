@@ -111,6 +111,9 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
 		return errorResponse("Failed to decrypt signature/n parameter", 500);
 	}
 
+	let appliedSignature = false;
+	let appliedNParam = false;
+
 	for (const response of result.responses) {
 		if (response.type !== "result") continue;
 
@@ -118,11 +121,21 @@ export const handleResolveUrl = async (req: Request): Promise<Response> => {
 			const sigKey = signature_key || "sig";
 			url.searchParams.set(sigKey, response.data[encrypted_signature]);
 			url.searchParams.delete("s");
+			appliedSignature = true;
 		}
 
 		if (nParam && nParam in response.data) {
 			url.searchParams.set("n", response.data[nParam]);
+			appliedNParam = true;
 		}
+	}
+
+	if (encrypted_signature && !appliedSignature) {
+		return errorResponse("Failed to resolve encrypted signature", 500);
+	}
+
+	if (nParam && !appliedNParam) {
+		return errorResponse("Failed to resolve n parameter", 500);
 	}
 
 	const responseData: ResolveUrlResponse = { resolved_url: url.toString() };
