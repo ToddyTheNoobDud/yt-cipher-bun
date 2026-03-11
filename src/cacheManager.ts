@@ -210,8 +210,16 @@ export const getPlayerContent = async (path: string): Promise<string> => {
 	const cached = contentCache.get(path);
 	if (cached) return cached;
 
-	const mapped = Bun.mmap(path);
-	const content = new TextDecoder().decode(mapped);
+	let content: string;
+	try {
+		const mapped = Bun.mmap(path);
+		content = typeof mapped === "string" ? mapped : new TextDecoder().decode(mapped);
+	} catch (error) {
+		const isUnsupportedMmap =
+			error instanceof Error && /mmapFile is not supported on Windows/i.test(error.message);
+		if (!isUnsupportedMmap) throw error;
+		content = await Bun.file(path).text();
+	}
 
 	contentCache.set(path, content);
 	return content;

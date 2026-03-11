@@ -1,6 +1,6 @@
 const HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com"]);
 const PATH_PREFIX = "/s/player/";
-const FORCED_PLAYER_ID = "9f4cc5e4";
+const FORCED_PLAYER_ID = "140dafda";
 
 // temp hack for now, forcing player id to 9f4cc5e4
 const forcePlayerPath = (pathname: string): string => {
