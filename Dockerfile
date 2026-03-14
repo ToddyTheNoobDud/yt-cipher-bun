@@ -11,8 +11,8 @@ RUN bun install --frozen-lockfile || bun install
 
 COPY . .
 
-ARG EJS_REPO=https://github.com/kikkia/ejs.git
-ARG EJS_REF=2aa16f2ecb1629921eb17a5c4872827bc09a9edb
+ARG EJS_REPO=https://github.com/yt-dlp/ejs.git
+ARG EJS_REF=cd4e87f52e87ab6d8b318fd3a817adda6fafa8dc
 RUN set -e; \
 	if [ ! -f ejs/src/yt/solver/main.ts ]; then \
 		echo "ejs submodule missing, fetching ${EJS_REF} from ${EJS_REPO}"; \
