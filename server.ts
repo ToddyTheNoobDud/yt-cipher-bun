@@ -12,7 +12,7 @@ const API_TOKEN = env.API_TOKEN || "";
 const PORT = parseInt(env.PORT || "8001", 10);
 const HAS_TOKEN = !!API_TOKEN;
 
-const ROUTES = new Map([
+const ROUTES = new Map<string, (req: Request) => Response | Promise<Response>>([
 	["/", handleDocs],
 	["/health", handleHealth],
 	["/decrypt_signature", handleDecryptSignature],
@@ -45,12 +45,12 @@ const start = async (): Promise<void> => {
 	await initCaches();
 	initWorkers();
 
-	const server = serve({ fetch: handler, port: PORT });
+	const server = serve({ fetch: handler, port: PORT, reusePort: true });
 	console.log(`Listening on port ${PORT}`);
 
 	const shutdown = (): void => {
 		shutdownWorkers();
-		server.stop();
+		server.stop(true);
 		process.exit(0);
 	};
 
