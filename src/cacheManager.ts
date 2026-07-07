@@ -177,13 +177,16 @@ cleanupTimer = setInterval(() => _internal.cleanup(), CLEANUP_INTERVAL)
 export const getPlayerFilePath = async (url: string): Promise<string> => {
   const normalizedUrl = validateUrl(url)
   const playerId = extractPlayerId(normalizedUrl)
-  // Include variant in cache key so different variants of the same player
-  // (ias, embed, tv, es6) don't clobber each other
+  // Build cache key from player ID + variant to avoid collisions
+  // Different variants of same player (ias, embed, tv, es6) get unique keys
+  const variant = playerId !== 'unknown'
+    ? normalizedUrl.split('/').slice(4).join('_').replace(/[^a-zA-Z0-9_-]/g, '_')
+    : _internal.hash(normalizedUrl)
   const cacheKey = playerId !== 'unknown'
-    ? _internal.hash(normalizedUrl)
+    ? `${playerId}__${variant}`
     : _internal.hash(normalizedUrl)
 
-  const filePath = _internal.getFilePath(cacheKey)
+  const filePath = _internal.getFilePath(cacheKey.replace(/[^a-zA-Z0-9_-]/g, '_'))
   const now = Date.now()
 
   await _internal.loadMeta()
@@ -191,6 +194,7 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
   if (metadata.players[cacheKey]) {
     metadata.players[cacheKey].a = now
     if (metadata.players[cacheKey].url !== normalizedUrl) {
+      console.log(`[Cache] Player URL changed for ${cacheKey}, invalidating`)
       await _internal.unlinkFile(filePath)
       delete metadata.players[cacheKey]
     }
@@ -202,13 +206,16 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
       if (exists) {
         _internal.scheduleSave()
         return filePath
-      } else {
-        delete metadata.players[cacheKey]
       }
+      console.log(`[Cache] File missing for ${cacheKey}, re-downloading`)
+      delete metadata.players[cacheKey]
     } else {
+      console.log(`[Cache] TTL expired for ${cacheKey}, re-downloading`)
       await _internal.unlinkFile(filePath)
       delete metadata.players[cacheKey]
     }
+  } else {
+    console.log(`[Cache] Cache miss for ${cacheKey}, downloading ${normalizedUrl}`)
   }
 
   const res = await fetch(normalizedUrl)
