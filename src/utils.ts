@@ -1,7 +1,8 @@
 const HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com'])
 const PATH_PREFIX = '/s/player/'
+const IAS_PLAYER_PATH = ['player_ias.vflset', 'en_US', 'base.js']
 
-const normalizePlayerPath = (pathname: string): string => {
+const forcePlayerPath = (pathname: string): string => {
   if (!pathname.startsWith(PATH_PREFIX))
     throw new Error(`Invalid player path: ${pathname}`)
 
@@ -10,14 +11,13 @@ const normalizePlayerPath = (pathname: string): string => {
     throw new Error(`Invalid player path: ${pathname}`)
   }
 
-  const variant = parts.slice(3).join('/')
-  return `/${['s', 'player', variant].join('/')}`
+  return `/${['s', 'player', parts[3], ...IAS_PLAYER_PATH].join('/')}`
 }
 
 export const validateUrl = (url: string): string => {
   if (url.startsWith('/')) {
     const normalized = new URL(`https://www.youtube.com${url}`)
-    normalized.pathname = normalizePlayerPath(normalized.pathname)
+    normalized.pathname = forcePlayerPath(normalized.pathname)
     return normalized.toString()
   }
 
@@ -25,7 +25,7 @@ export const validateUrl = (url: string): string => {
     const parsed = new URL(url)
     if (!HOSTS.has(parsed.hostname))
       throw new Error(`Player URL from invalid host: ${parsed.hostname}`)
-    parsed.pathname = normalizePlayerPath(parsed.pathname)
+    parsed.pathname = forcePlayerPath(parsed.pathname)
     return parsed.toString()
   } catch {
     throw new Error(`Invalid player URL: ${url}`)
