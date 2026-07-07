@@ -3,9 +3,9 @@ const PATH_PREFIX = '/s/player/'
 
 /** Map embed player variant to TV variant for TVHTML5 client support */
 const VARIANT_MAP: Record<string, string> = {
-  'player_embed.vflset': 'tv-player-ias.vflset/tv-player-ias.js',
+  'player_embed.vflset': 'player_ias.vflset/en_US/base.js',
   'player_ias.vflset': 'player_ias.vflset/en_US/base.js',
-  'player_es6.vflset': 'player_es6.vflset/en_US/base.js',
+  'player_es6.vflset': 'player_es6.vflset/en_US/base.js'
 }
 
 const forcePlayerPath = (pathname: string): string => {

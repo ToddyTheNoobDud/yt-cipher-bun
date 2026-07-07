@@ -1,4 +1,3 @@
-import type { Input } from '../../ejs/src/yt/solver/main.ts'
 import {
   getPlayerContent,
   getPlayerFilePath,
@@ -59,32 +58,36 @@ export const handleDecryptSignature = async (
     }
   }
 
-  const input: Input = preprocessed
+  const input = preprocessed
     ? {
-        type: 'preprocessed',
+        type: 'preprocessed' as const,
         preprocessed_player: preprocessed,
         requests: [
           {
-            type: 'sig',
+            type: 'sig' as const,
             challenges: encrypted_signature ? [encrypted_signature] : []
           },
-          { type: 'n', challenges: n_param ? [n_param] : [] }
-        ]
+          { type: 'n' as const, challenges: n_param ? [n_param] : [] }
+        ],
+        cacheKey: path
       }
     : {
-        type: 'player',
+        type: 'player' as const,
+        // biome-ignore lint/style/noNonNullAssertion: player is fetched on cache miss
         player: player!,
         output_preprocessed: true,
         requests: [
           {
-            type: 'sig',
+            type: 'sig' as const,
             challenges: encrypted_signature ? [encrypted_signature] : []
           },
-          { type: 'n', challenges: n_param ? [n_param] : [] }
-        ]
+          { type: 'n' as const, challenges: n_param ? [n_param] : [] }
+        ],
+        cacheKey: path
       }
 
-  const output = await execInPool(input)
+  // biome-ignore lint/suspicious/noExplicitAny: WorkerPool input casts to any
+  const output = await execInPool(input as any)
 
   if (output.type === 'error') return errorResponse(output.error, 500)
 

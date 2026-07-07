@@ -40,16 +40,20 @@ const _decrypt = async (
       ? {
           type: 'preprocessed' as const,
           preprocessed_player: preprocessed,
-          requests
+          requests,
+          cacheKey: path
         }
       : {
           type: 'player' as const,
+          // biome-ignore lint/style/noNonNullAssertion: player is fetched on cache miss
           player: player!,
           output_preprocessed: true,
-          requests
+          requests,
+          cacheKey: path
         }
 
-    const output = await execInPool(input)
+    // biome-ignore lint/suspicious/noExplicitAny: WorkerPool input casts to any
+    const output = await execInPool(input as any)
 
     if (output.type === 'error') return null
 
@@ -58,6 +62,7 @@ const _decrypt = async (
     }
 
     return {
+      // biome-ignore lint/suspicious/noExplicitAny: responses are dynamically cast
       responses: (output.responses || []) as any[],
       preprocessedPlayer: output.preprocessed_player
     }
