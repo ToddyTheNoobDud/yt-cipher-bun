@@ -177,33 +177,37 @@ cleanupTimer = setInterval(() => _internal.cleanup(), CLEANUP_INTERVAL)
 export const getPlayerFilePath = async (url: string): Promise<string> => {
   const normalizedUrl = validateUrl(url)
   const playerId = extractPlayerId(normalizedUrl)
-  const hash = playerId !== 'unknown' ? playerId : _internal.hash(normalizedUrl)
+  // Include variant in cache key so different variants of the same player
+  // (ias, embed, tv, es6) don't clobber each other
+  const cacheKey = playerId !== 'unknown'
+    ? _internal.hash(normalizedUrl)
+    : _internal.hash(normalizedUrl)
 
-  const filePath = _internal.getFilePath(hash)
+  const filePath = _internal.getFilePath(cacheKey)
   const now = Date.now()
 
   await _internal.loadMeta()
 
-  if (metadata.players[hash]) {
-    metadata.players[hash].a = now
-    if (metadata.players[hash].url !== normalizedUrl) {
+  if (metadata.players[cacheKey]) {
+    metadata.players[cacheKey].a = now
+    if (metadata.players[cacheKey].url !== normalizedUrl) {
       await _internal.unlinkFile(filePath)
-      delete metadata.players[hash]
+      delete metadata.players[cacheKey]
     }
   }
 
-  if (metadata.players[hash]) {
-    if (now - metadata.players[hash].t <= PLAYER_TTL) {
+  if (metadata.players[cacheKey]) {
+    if (now - metadata.players[cacheKey].t <= PLAYER_TTL) {
       const exists = await Bun.file(filePath).exists()
       if (exists) {
         _internal.scheduleSave()
         return filePath
       } else {
-        delete metadata.players[hash]
+        delete metadata.players[cacheKey]
       }
     } else {
       await _internal.unlinkFile(filePath)
-      delete metadata.players[hash]
+      delete metadata.players[cacheKey]
     }
   }
 
@@ -214,7 +218,7 @@ export const getPlayerFilePath = async (url: string): Promise<string> => {
 
   await Bun.write(filePath, content)
 
-  metadata.players[hash] = { url: normalizedUrl, t: now, a: now }
+  metadata.players[cacheKey] = { url: normalizedUrl, t: now, a: now }
   _internal.scheduleSave()
 
   return filePath
